@@ -1,0 +1,30 @@
+name: floorplan_detection_app
+description: "A new Flutter project."
+publish_to: "none"
+version: 0.1.0
+
+environment:
+  sdk: ^3.6.1
+
+dependencies:
+  flutter:
+    sdk: flutter
+  image: ^4.1.7
+  image_picker: ^1.0.7
+  path_provider: ^2.1.2
+  tflite_flutter: ^0.11.0
+  file_picker: ^8.0.0+1
+  printing: ^5.12.0
+  pdf: ^3.10.7
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true
+
+  assets:
+    - assets/models/
+    - assets/images/
