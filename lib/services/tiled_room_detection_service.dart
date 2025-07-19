@@ -22,7 +22,8 @@ class TiledRoomDetectionService {
   bool get isModelLoaded => _baseDetectionService.isModelLoaded;
 
   /// Process a PDF file and detect rooms using tiling approach
-  Future<List<Detection>> processPDF(File pdfFile, {double dpi = 150.0}) async {
+  Future<List<Detection>> processPDF(File pdfFile,
+      {double dpi = 150.0, Function(int, int)? onProgress}) async {
     print('=== Starting PDF processing ===');
 
     // Step 1: Convert PDF to image
@@ -33,12 +34,13 @@ class TiledRoomDetectionService {
 
     print('PDF converted to image: ${image.width}x${image.height}');
 
-    // Step 2: Process the image using tiling
-    return await processLargeImage(image);
+    // Step 2: Process the image using tiling with progress callback
+    return await processLargeImage(image, onProgress: onProgress);
   }
 
   /// Process a large image using tiling approach for room detection
-  Future<List<Detection>> processLargeImage(img.Image image) async {
+  Future<List<Detection>> processLargeImage(img.Image image,
+      {Function(int, int)? onProgress}) async {
     print('=== Starting tiled room detection ===');
     print('Input image size: ${image.width}x${image.height}');
 
@@ -46,7 +48,7 @@ class TiledRoomDetectionService {
     final tiles = PdfProcessingService.createImageTiles(image);
     print('Created ${tiles.length} tiles for processing');
 
-    // Step 2: Process each tile
+    // Step 2: Process each tile with async breaks to prevent UI hanging
     List<Detection> allDetections = [];
     int processedTiles = 0;
 
@@ -73,6 +75,15 @@ class TiledRoomDetectionService {
             'Tile ${tile.index} contributed ${globalDetections.length} global detections');
         allDetections.addAll(globalDetections);
         processedTiles++;
+
+        // Report progress to caller if callback provided
+        if (onProgress != null) {
+          onProgress(processedTiles, tiles.length);
+        }
+
+        // Yield control back to the UI thread after each tile to prevent hanging
+        // This allows the UI to update progress and remain responsive
+        await Future.delayed(Duration.zero);
       } catch (e) {
         print('Error processing tile ${tile.index}: $e');
         // Continue with other tiles even if one fails

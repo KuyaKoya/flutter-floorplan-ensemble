@@ -6,10 +6,22 @@ import 'package:image/image.dart' as img;
 
 class RoomDetectionService {
   static const int inputSize = 640;
-  static const double confidenceThreshold = 0.5;
+  static const double confidenceThreshold =
+      0.3; // Lowered threshold for better detection
   static const double iouGroupingThreshold = 0.5;
   static const double nmsThreshold = 0.45;
-  static const int roomClassId = 0;
+  static const int roomClassId = 0; // Room class ID
+
+  // List of room-related class names (you can expand this)
+  static const List<String> roomClassNames = [
+    'room',
+    'bedroom',
+    'living_room',
+    'kitchen',
+    'bathroom',
+    'office',
+    'dining_room'
+  ];
 
   final List<ModelConfig> modelConfigs;
   final List<Interpreter> _interpreters = [];
@@ -72,27 +84,59 @@ class RoomDetectionService {
       final interpreter = _interpreters[i];
       final weight = modelConfigs[i].weight;
 
-      final output = List.generate(
-          1, (_) => List.generate(25200, (_) => List.filled(6, 0.0)));
-
       try {
+        // Get output shape to determine model format
+        final outputShape = interpreter.getOutputTensor(0).shape;
+        print('Model $i output shape: $outputShape');
+
+        // Dynamically create output buffer based on actual shape
+        final output = _createOutputBuffer(outputShape);
+
+        print('Running inference for model $i...');
         interpreter.run(inputData, output);
-        allDetections.addAll(postprocessDetections(
+        print('Model $i inference completed successfully');
+
+        final modelDetections = postprocessDetections(
           output,
+          outputShape,
           image.width.toDouble(),
           image.height.toDouble(),
           weight,
-        ));
+        );
+
+        print('Model $i produced ${modelDetections.length} detections');
+        allDetections.addAll(modelDetections);
+
+        // Yield control back to UI thread after each model to prevent freezing
+        await Future.delayed(Duration.zero);
       } catch (e) {
         print('Model $i inference failed: $e');
+        print('Model $i stack trace: ${StackTrace.current}');
       }
     }
 
     return applyNMS(averageOverlappingBoxes(allDetections));
   }
 
+  /// Create output buffer based on the model's actual output shape
+  dynamic _createOutputBuffer(List<int> shape) {
+    if (shape.length == 3) {
+      // YOLOv8 format: [batch, features, anchors]
+      return List.generate(shape[0],
+          (_) => List.generate(shape[1], (_) => List.filled(shape[2], 0.0)));
+    } else if (shape.length == 3 && shape[1] > shape[2]) {
+      // YOLOv5 format: [batch, anchors, features]
+      return List.generate(shape[0],
+          (_) => List.generate(shape[1], (_) => List.filled(shape[2], 0.0)));
+    } else {
+      // Fallback for other formats
+      throw Exception('Unsupported output shape: $shape');
+    }
+  }
+
   List<Detection> postprocessDetections(
-    List<List<List<double>>> output,
+    dynamic output,
+    List<int> outputShape,
     double originalWidth,
     double originalHeight,
     double confidenceWeight,
@@ -101,30 +145,99 @@ class RoomDetectionService {
     double scaleX = originalWidth / inputSize;
     double scaleY = originalHeight / inputSize;
 
-    for (var det in output[0]) {
-      double confidence = det[4] * confidenceWeight;
-      int classId = det[5].round();
+    // Determine if this is YOLOv8 or YOLOv5 format
+    bool isYOLOv8 = outputShape.length == 3 && outputShape[1] > outputShape[2];
+    print(
+        'Processing ${isYOLOv8 ? "YOLOv8" : "YOLOv5"} format output: $outputShape');
 
-      if (confidence >= confidenceThreshold && classId == roomClassId) {
-        double cx = det[0] * scaleX;
-        double cy = det[1] * scaleY;
-        double w = det[2] * scaleX;
-        double h = det[3] * scaleY;
-        double left = cx - w / 2;
-        double top = cy - h / 2;
+    if (isYOLOv8) {
+      // YOLOv8 format: [batch, features, anchors] -> [1, 37, 8400]
+      // Features: [x, y, w, h, conf, class0, class1, ..., classN]
+      final anchors = outputShape[2]; // 8400
+      final features = outputShape[1]; // 37 (4 coords + 1 conf + 32 classes)
 
-        detections.add(Detection(
-          left: left,
-          top: top,
-          width: w,
-          height: h,
-          confidence: confidence,
-          classId: classId,
-          label: 'Room',
-        ));
+      for (int i = 0; i < anchors; i++) {
+        // Extract coordinates and confidence
+        double cx = output[0][0][i]; // center x
+        double cy = output[0][1][i]; // center y
+        double w = output[0][2][i]; // width
+        double h = output[0][3][i]; // height
+        double objectness = output[0][4][i]; // objectness score
+
+        // Find best class (check multiple room-related classes)
+        double maxClassScore = 0.0;
+        int bestClassId = 0;
+        String bestClassName = 'Room';
+
+        for (int c = 5; c < features; c++) {
+          double classScore = output[0][c][i];
+          if (classScore > maxClassScore) {
+            maxClassScore = classScore;
+            bestClassId = c - 5; // Subtract 5 to get actual class index
+            // Use class name if available, otherwise default to 'Room'
+            if (bestClassId < roomClassNames.length) {
+              bestClassName = roomClassNames[bestClassId];
+            } else {
+              bestClassName = 'Room_$bestClassId';
+            }
+          }
+        }
+
+        // Calculate final confidence (objectness * class_score)
+        double confidence = objectness * maxClassScore * confidenceWeight;
+
+        // Accept any room-related class or class 0
+        bool isRoomClass =
+            bestClassId < roomClassNames.length || bestClassId == roomClassId;
+
+        if (confidence >= confidenceThreshold && isRoomClass) {
+          // Convert from center coordinates to top-left coordinates
+          double left = (cx - w / 2) * scaleX;
+          double top = (cy - h / 2) * scaleY;
+          double width = w * scaleX;
+          double height = h * scaleY;
+
+          detections.add(Detection(
+            left: left,
+            top: top,
+            width: width,
+            height: height,
+            confidence: confidence,
+            classId: bestClassId,
+            label: bestClassName,
+          ));
+        }
+      }
+    } else {
+      // YOLOv5 format: [batch, anchors, features] -> [1, 25200, 6]
+      // Features: [x, y, w, h, conf, class]
+      for (var det in output[0]) {
+        double confidence = det[4] * confidenceWeight;
+        int classId = det[5].round();
+
+        if (confidence >= confidenceThreshold && classId == roomClassId) {
+          double cx = det[0] * scaleX;
+          double cy = det[1] * scaleY;
+          double w = det[2] * scaleX;
+          double h = det[3] * scaleY;
+          double left = cx - w / 2;
+          double top = cy - h / 2;
+
+          detections.add(Detection(
+            left: left,
+            top: top,
+            width: w,
+            height: h,
+            confidence: confidence,
+            classId: classId,
+            label: 'Room',
+          ));
+        }
       }
     }
 
+    print(
+        'Extracted ${detections.length} detections from ${isYOLOv8 ? "YOLOv8" : "YOLOv5"} output');
     return detections;
   }
 
