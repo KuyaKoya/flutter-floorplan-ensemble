@@ -10,19 +10,14 @@ import 'package:image/image.dart' as img;
 /// Processes entire images resized to 640x640 for direct model inference
 class StreamlinedRoomDetectionService {
   static const int inputSize = 640;
-  static const double confidenceThreshold = 0.3;
+  static const double confidenceThreshold =
+      0.1; // Lowered from 0.3 to catch more detections
   static const double iouGroupingThreshold = 0.5;
   static const double nmsThreshold = 0.45;
 
-  // Room-related class names
+  // Model only accepts 'room' as a class
   static const List<String> roomClassNames = [
-    'room',
-    'bedroom',
-    'living_room',
-    'kitchen',
-    'bathroom',
-    'office',
-    'dining_room'
+    'room', // Single class model
   ];
 
   final List<ModelConfig> modelConfigs;
@@ -134,9 +129,11 @@ class StreamlinedRoomDetectionService {
       // Log detection results
       if (detections.isEmpty) {
         _log('⚠️ No rooms detected. This could be due to:');
-        _log('  - Model confidence threshold too high');
+        _log(
+            '  - Model confidence threshold too low (current: $confidenceThreshold)');
         _log('  - Image doesn\'t contain recognizable room features');
-        _log('  - Model not trained for this type of floorplan');
+        _log('  - Model not suitable for this type of floorplan');
+        _log('  - Single-class model may need different preprocessing');
       } else {
         _log('=== Detection Results ===');
         for (int i = 0; i < detections.length; i++) {
@@ -163,7 +160,7 @@ class StreamlinedRoomDetectionService {
 
       // Preprocess image in isolate to avoid blocking UI
       _log('Preprocessing image for model input...');
-      final inputData = await compute(_preprocessImage, resizedImage);
+      final preprocessedData = await compute(_preprocessImage, resizedImage);
       _log('✓ Image preprocessing completed');
 
       List<Detection> allDetections = [];
@@ -176,45 +173,123 @@ class StreamlinedRoomDetectionService {
         _log('Running inference on model ${i + 1}/${_interpreters.length}...');
 
         try {
-          // Get output shape to determine model format
-          final outputShape = interpreter.getOutputTensor(0).shape;
-          _log('Model ${i + 1} output shape: $outputShape');
+          // Get input and output tensor information
+          final inputTensor = interpreter.getInputTensor(0);
+          final outputTensor = interpreter.getOutputTensor(0);
+
+          _log('Model ${i + 1} input shape: ${inputTensor.shape}');
+          _log('Model ${i + 1} input type: ${inputTensor.type}');
+          _log('Model ${i + 1} output shape: ${outputTensor.shape}');
+          _log('Model ${i + 1} output type: ${outputTensor.type}');
+
+          // Try different input formats based on what the model expects
+          _log('Attempting inference with different input formats...');
 
           // Create output buffer
-          final output = _createOutputBuffer(outputShape);
+          final output = _createOutputBuffer(outputTensor.shape);
 
-          // Run inference
-          interpreter.run(inputData, output);
-          _log('✓ Model ${i + 1} inference completed');
+          // Run inference with error handling for different input formats
+          bool inferenceSuccess = false;
+          String errorMessage = '';
+
+          // Try Float32List format first (most efficient)
+          try {
+            final inputData = preprocessedData['float32List'] as Float32List;
+            _log('Trying Float32List format (${inputData.length} elements)...');
+            interpreter.run(inputData, output);
+            _log(
+                '✓ Model ${i + 1} inference completed with Float32List format');
+            inferenceSuccess = true;
+          } catch (e) {
+            errorMessage = 'Float32List: $e';
+            _log('Float32List format failed: $e');
+
+            // Try nested list format as fallback
+            try {
+              final inputData = preprocessedData['nestedList'];
+              _log('Trying nested list format...');
+              interpreter.run(inputData, output);
+              _log(
+                  '✓ Model ${i + 1} inference completed with nested list format');
+              inferenceSuccess = true;
+            } catch (e2) {
+              errorMessage += ', Nested list: $e2';
+              _log('Nested list format also failed: $e2');
+
+              // Try with different tensor input approach
+              try {
+                final inputData =
+                    preprocessedData['float32List'] as Float32List;
+                _log('Trying alternative tensor input...');
+                // Reshape the data into proper tensor format
+                final reshapedInput = [inputData];
+                interpreter.run(reshapedInput, output);
+                _log(
+                    '✓ Model ${i + 1} inference completed with reshaped tensor');
+                inferenceSuccess = true;
+              } catch (e3) {
+                errorMessage += ', Reshaped: $e3';
+                _log(
+                    'All input formats failed for model ${i + 1}: $errorMessage');
+                // Don't throw exception here, continue with next model
+              }
+            }
+          }
+
+          if (!inferenceSuccess) {
+            _log(
+                '✗ Model ${i + 1} inference failed with all formats: $errorMessage');
+            continue; // Skip this model and try the next one
+          }
+
+          // Verify output is not null
+          if (output == null) {
+            _log('✗ Model ${i + 1} produced null output');
+            continue;
+          }
 
           // Post-process detections in isolate
           final modelDetections = await compute(_postprocessDetections, {
             'output': output,
-            'outputShape': outputShape,
+            'outputShape': outputTensor.shape,
             'originalWidth': originalImage.width.toDouble(),
             'originalHeight': originalImage.height.toDouble(),
             'weight': weight,
+            'confidenceThreshold': confidenceThreshold,
           });
 
           _log('Model ${i + 1} produced ${modelDetections.length} detections');
           allDetections.addAll(modelDetections);
-        } catch (e) {
+        } catch (e, stackTrace) {
           _log('✗ Model ${i + 1} inference failed: $e');
+          _log(
+              'Stack trace: ${stackTrace.toString().split('\n').take(3).join('\n')}');
           // Continue with other models
         }
       }
 
       // Apply NMS and final processing
       _log('Applying non-maximum suppression...');
-      final finalDetections =
-          _applyNMS(_averageOverlappingBoxes(allDetections));
+      _log('Total raw detections before NMS: ${allDetections.length}');
+
+      if (allDetections.isEmpty) {
+        _log('⚠️ No detections found from any model');
+        return <Detection>[]; // Return empty list instead of throwing
+      }
+
+      final averagedDetections = _averageOverlappingBoxes(allDetections);
+      _log('Detections after averaging: ${averagedDetections.length}');
+      final finalDetections = _applyNMS(averagedDetections);
       _log(
           '✓ Final processing completed: ${finalDetections.length} detections');
 
       return finalDetections;
-    } catch (e) {
+    } catch (e, stackTrace) {
       _log('✗ Inference failed: $e');
-      rethrow;
+      _log(
+          'Full stack trace: ${stackTrace.toString().split('\n').take(5).join('\n')}');
+      // Return empty list instead of crashing the app
+      return <Detection>[];
     }
   }
 
@@ -251,26 +326,63 @@ class StreamlinedRoomDetectionService {
   }
 
   /// Preprocess image for model input in isolate
-  static List<List<List<List<double>>>> _preprocessImage(img.Image image) {
-    final bytes = Float32List(inputSize * inputSize * 3);
-    int pixelIndex = 0;
+  static dynamic _preprocessImage(img.Image image) {
+    try {
+      print('Preprocessing image: ${image.width}x${image.height}');
 
-    for (int y = 0; y < inputSize; y++) {
-      for (int x = 0; x < inputSize; x++) {
-        final pixel = image.getPixel(x, y);
-        bytes[pixelIndex++] = pixel.r / 255.0;
-        bytes[pixelIndex++] = pixel.g / 255.0;
-        bytes[pixelIndex++] = pixel.b / 255.0;
+      // Ensure we have a valid 640x640 image
+      if (image.width != inputSize || image.height != inputSize) {
+        throw Exception(
+            'Image must be ${inputSize}x$inputSize, got ${image.width}x${image.height}');
       }
-    }
 
-    return [
-      List.generate(inputSize, (h) {
-        return List.generate(inputSize, (w) {
-          return List.generate(3, (c) => bytes[(h * inputSize + w) * 3 + c]);
+      // Create different input formats for TensorFlow Lite compatibility
+      final inputBytes = Float32List(1 * inputSize * inputSize * 3);
+      int pixelIndex = 0;
+
+      // Convert image to NHWC format (batch, height, width, channels)
+      for (int y = 0; y < inputSize; y++) {
+        for (int x = 0; x < inputSize; x++) {
+          final pixel = image.getPixel(x, y);
+
+          // Normalize pixel values to [0, 1] range
+          final r = pixel.r / 255.0;
+          final g = pixel.g / 255.0;
+          final b = pixel.b / 255.0;
+
+          inputBytes[pixelIndex++] = r;
+          inputBytes[pixelIndex++] = g;
+          inputBytes[pixelIndex++] = b;
+        }
+      }
+
+      print('Generated Float32List with ${inputBytes.length} elements');
+
+      // Create nested list format (4D: [batch, height, width, channels])
+      final nestedList = List.generate(1, (batch) {
+        return List.generate(inputSize, (h) {
+          return List.generate(inputSize, (w) {
+            final baseIndex = (h * inputSize + w) * 3;
+            return [
+              inputBytes[baseIndex], // R
+              inputBytes[baseIndex + 1], // G
+              inputBytes[baseIndex + 2], // B
+            ];
+          });
         });
-      })
-    ];
+      });
+
+      print('Generated nested list with shape: [1, $inputSize, $inputSize, 3]');
+
+      return {
+        'float32List': inputBytes,
+        'nestedList': nestedList,
+      };
+    } catch (e, stackTrace) {
+      print('Error in preprocessing: $e');
+      print('Stack trace: $stackTrace');
+      rethrow;
+    }
   }
 
   /// Post-process detections in isolate
@@ -280,46 +392,94 @@ class StreamlinedRoomDetectionService {
     final originalWidth = params['originalWidth'] as double;
     final originalHeight = params['originalHeight'] as double;
     final weight = params['weight'] as double;
+    final confThreshold = params['confidenceThreshold'] as double;
 
     List<Detection> detections = [];
 
-    if (outputShape.length == 3) {
-      // YOLOv5 format: [1, 25200, 85] or similar
-      final numDetections = outputShape[1];
-      final numFeatures = outputShape[2];
+    try {
+      print('Postprocessing: Output shape = $outputShape');
 
-      for (int i = 0; i < numDetections; i++) {
-        final confidence = output[0][i][4] * weight;
+      if (outputShape.length == 3) {
+        // Handle both YOLOv5 [1, num_detections, num_features] and YOLOv8 transposed [1, num_features, num_detections]
+        final dim1 = outputShape[1]; // Could be detections or features
+        final dim2 = outputShape[2]; // Could be features or detections
 
-        if (confidence > confidenceThreshold) {
-          // Extract class scores (skip first 5 elements: x, y, w, h, objectness)
-          double maxClassScore = 0.0;
-          int bestClassId = 0;
+        print('Postprocessing: dim1=$dim1, dim2=$dim2');
 
-          for (int c = 5; c < numFeatures; c++) {
-            final classScore = output[0][i][c];
-            if (classScore > maxClassScore) {
-              maxClassScore = classScore;
-              bestClassId = c - 5;
-            }
+        if (dim1 > dim2) {
+          // YOLOv5 format: [1, 25200, 85] - more detections than features
+          print('Processing as YOLOv5 format');
+          _processYOLOv5Format(output, dim1, dim2, originalWidth,
+              originalHeight, weight, detections, confThreshold);
+        } else {
+          // YOLOv8 format: [1, 37, 8400] - more detections than features (transposed)
+          print('Processing as YOLOv8 format (single-class room model)');
+          _processYOLOv8Format(output, dim1, dim2, originalWidth,
+              originalHeight, weight, detections, confThreshold);
+        }
+      } else if (outputShape.length == 2) {
+        // Direct 2D format: [num_features, num_detections]
+        final numFeatures = outputShape[0];
+        final numDetections = outputShape[1];
+        print('Processing as 2D YOLOv8 format');
+        _processYOLOv8Format(output, numFeatures, numDetections, originalWidth,
+            originalHeight, weight, detections, confThreshold);
+      } else {
+        throw Exception('Unsupported output shape: $outputShape');
+      }
+
+      print('Postprocessing complete: Found ${detections.length} detections');
+    } catch (e) {
+      print('Error in postprocessing: $e');
+      // Return empty list instead of crashing
+    }
+
+    return detections;
+  }
+
+  /// Process YOLOv5 format detections
+  static void _processYOLOv5Format(
+      dynamic output,
+      int numDetections,
+      int numFeatures,
+      double originalWidth,
+      double originalHeight,
+      double weight,
+      List<Detection> detections,
+      double confThreshold) {
+    for (int i = 0; i < numDetections; i++) {
+      try {
+        // Safely access output values with null checks
+        final detection = output[0]?[i];
+        if (detection == null || detection.length < 5) continue;
+
+        final objectness = detection[4]?.toDouble() ?? 0.0;
+
+        if (objectness * weight > confThreshold) {
+          // For single-class model, use objectness as confidence or check if there's a class score
+          double finalConfidence = objectness * weight;
+
+          // If there are class scores beyond index 5, use the first (and likely only) class
+          if (numFeatures > 5 && detection.length > 5) {
+            final classScore = detection[5]?.toDouble() ??
+                1.0; // Default to 1.0 for single class
+            finalConfidence = objectness * classScore * weight;
           }
 
-          final finalConfidence = confidence * maxClassScore;
-          if (finalConfidence > confidenceThreshold) {
+          if (finalConfidence > confThreshold) {
             // Convert from center format to corner format
-            final centerX = output[0][i][0];
-            final centerY = output[0][i][1];
-            final width = output[0][i][2];
-            final height = output[0][i][3];
+            final centerX = detection[0]?.toDouble() ?? 0.0;
+            final centerY = detection[1]?.toDouble() ?? 0.0;
+            final width = detection[2]?.toDouble() ?? 0.0;
+            final height = detection[3]?.toDouble() ?? 0.0;
 
             final left = (centerX - width / 2) * originalWidth / inputSize;
             final top = (centerY - height / 2) * originalHeight / inputSize;
             final detWidth = width * originalWidth / inputSize;
             final detHeight = height * originalHeight / inputSize;
 
-            final className = bestClassId < roomClassNames.length
-                ? roomClassNames[bestClassId]
-                : 'room';
+            // Skip invalid detections
+            if (detWidth <= 0 || detHeight <= 0) continue;
 
             detections.add(Detection(
               left: left,
@@ -327,46 +487,62 @@ class StreamlinedRoomDetectionService {
               width: detWidth,
               height: detHeight,
               confidence: finalConfidence,
-              classId: bestClassId,
-              label: className,
+              classId: 0, // Single class always has ID 0
+              label: 'room', // Always 'room' for single-class model
             ));
           }
         }
+      } catch (e) {
+        // Skip this detection and continue
+        continue;
       }
-    } else if (outputShape.length == 2) {
-      // YOLOv8 format: [1, 84, 8400] or similar
-      final numFeatures = outputShape[1];
-      final numDetections = outputShape[2];
+    }
+  }
 
-      for (int i = 0; i < numDetections; i++) {
-        // Extract class scores (features 4 onwards)
-        double maxClassScore = 0.0;
-        int bestClassId = 0;
+  /// Process YOLOv8 format detections
+  static void _processYOLOv8Format(
+      dynamic output,
+      int numFeatures,
+      int numDetections,
+      double originalWidth,
+      double originalHeight,
+      double weight,
+      List<Detection> detections,
+      double confThreshold) {
+    for (int i = 0; i < numDetections; i++) {
+      try {
+        // Safely access output values with null checks
+        final batch = output[0];
+        if (batch == null) continue;
 
-        for (int c = 4; c < numFeatures; c++) {
-          final classScore = output[0][c][i];
-          if (classScore > maxClassScore) {
-            maxClassScore = classScore;
-            bestClassId = c - 4;
+        // For single-class model, the class score is at feature index 4
+        double confidence = 0.0;
+
+        if (numFeatures > 4) {
+          // Extract the single class score (feature 4)
+          final featureArray = batch[4];
+          if (featureArray != null && i < featureArray.length) {
+            confidence = (featureArray[i]?.toDouble() ?? 0.0) * weight;
           }
+        } else {
+          // If no class scores, use a default high confidence for detected objects
+          confidence = 0.8 * weight;
         }
 
-        final confidence = maxClassScore * weight;
-        if (confidence > confidenceThreshold) {
-          // Convert from center format to corner format
-          final centerX = output[0][0][i];
-          final centerY = output[0][1][i];
-          final width = output[0][2][i];
-          final height = output[0][3][i];
+        if (confidence > confThreshold) {
+          // Extract bounding box coordinates
+          final centerX = batch[0]?[i]?.toDouble() ?? 0.0;
+          final centerY = batch[1]?[i]?.toDouble() ?? 0.0;
+          final width = batch[2]?[i]?.toDouble() ?? 0.0;
+          final height = batch[3]?[i]?.toDouble() ?? 0.0;
 
           final left = (centerX - width / 2) * originalWidth / inputSize;
           final top = (centerY - height / 2) * originalHeight / inputSize;
           final detWidth = width * originalWidth / inputSize;
           final detHeight = height * originalHeight / inputSize;
 
-          final className = bestClassId < roomClassNames.length
-              ? roomClassNames[bestClassId]
-              : 'room';
+          // Skip invalid detections
+          if (detWidth <= 0 || detHeight <= 0) continue;
 
           detections.add(Detection(
             left: left,
@@ -374,28 +550,37 @@ class StreamlinedRoomDetectionService {
             width: detWidth,
             height: detHeight,
             confidence: confidence,
-            classId: bestClassId,
-            label: className,
+            classId: 0, // Single class always has ID 0
+            label: 'room', // Always 'room' for single-class model
           ));
         }
+      } catch (e) {
+        // Skip this detection and continue
+        continue;
       }
     }
-
-    return detections;
   }
 
   /// Create output buffer based on model output shape
   dynamic _createOutputBuffer(List<int> shape) {
     if (shape.length == 3) {
-      // YOLOv5 format: [batch, detections, features]
+      // YOLOv5 format: [batch, detections, features] or YOLOv8: [batch, features, detections]
       return List.generate(shape[0],
           (b) => List.generate(shape[1], (d) => List.filled(shape[2], 0.0)));
     } else if (shape.length == 2) {
-      // YOLOv8 format: [batch, features, detections]
-      return List.generate(shape[0],
-          (b) => List.generate(shape[1], (f) => List.filled(shape[2], 0.0)));
+      // 2D format: [features, detections]
+      return List.generate(shape[0], (f) => List.filled(shape[1], 0.0));
+    } else if (shape.length == 4) {
+      // 4D format: [batch, height, width, channels]
+      return List.generate(
+          shape[0],
+          (b) => List.generate(
+              shape[1],
+              (h) =>
+                  List.generate(shape[2], (w) => List.filled(shape[3], 0.0))));
     } else {
-      throw Exception('Unsupported output shape: $shape');
+      throw Exception(
+          'Unsupported output shape: $shape (${shape.length}D tensor)');
     }
   }
 

@@ -226,10 +226,12 @@ class _FloorPlanDetectionScreenState extends State<FloorPlanDetectionScreen> {
 
       if (detections.isEmpty) {
         _addLog('⚠️ No rooms detected. This could be due to:');
-        _addLog('  - Model confidence threshold too high');
-        _addLog('  - Model format mismatch (YOLOv5 vs YOLOv8)');
+        _addLog('  - Model confidence threshold too low (currently ${0.1})');
+        _addLog('  - Model designed for single \'room\' class only');
         _addLog('  - Image doesn\'t contain recognizable room features');
         _addLog('  - Model not trained for this type of floorplan');
+        _addLog('  - Model output processing errors (check for null values)');
+        _addLog('  - Image resolution/quality issues');
       }
 
       // Load the processed image for display
@@ -291,11 +293,13 @@ class _FloorPlanDetectionScreenState extends State<FloorPlanDetectionScreen> {
       if (detections.isEmpty) {
         _addLog('⚠️ No rooms detected in PDF. This could be due to:');
         _addLog('  - PDF rasterization quality too low');
-        _addLog('  - Model confidence threshold too high');
+        _addLog('  - Model confidence threshold too low (currently ${0.1})');
+        _addLog('  - Model designed for single \'room\' class only');
         _addLog(
             '  - PDF contains architectural drawings not suitable for room detection');
         _addLog(
-            '  - Model format issues (check console for shape mismatch errors)');
+            '  - Model output processing errors (check console for null values)');
+        _addLog('  - PDF complexity too high for current model');
       }
 
       // Get the processed image for display
