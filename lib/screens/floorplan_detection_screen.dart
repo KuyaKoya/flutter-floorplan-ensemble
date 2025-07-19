@@ -6,7 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:image/image.dart' as img;
-import '../services/tiled_room_detection_service.dart';
+import '../services/streamlined_room_detection_service.dart';
 import '../services/pdf_processing_service.dart';
 import '../widgets/detection_overlay.dart';
 
@@ -19,15 +19,9 @@ class FloorPlanDetectionScreen extends StatefulWidget {
 }
 
 class _FloorPlanDetectionScreenState extends State<FloorPlanDetectionScreen> {
-  final TiledRoomDetectionService _detectionService = TiledRoomDetectionService(
-    modelConfigs: [
-      ModelConfig(
-          assetPath: 'assets/models/floorplan_v17.2.tflite', weight: 1.0),
-      ModelConfig(
-          assetPath: 'assets/models/floorplan_v12.tflite', weight: 0.75),
-    ],
-  );
+  late final StreamlinedRoomDetectionService _detectionService;
   final ImagePicker _imagePicker = ImagePicker();
+  final ScrollController _logScrollController = ScrollController();
 
   File? _selectedImage;
   File? _selectedPdf;
@@ -37,13 +31,24 @@ class _FloorPlanDetectionScreenState extends State<FloorPlanDetectionScreen> {
   bool _isModelLoaded = false;
   String _statusMessage = 'Initializing...';
   final List<String> _processLogs = [];
-  bool _showLogs = false;
 
   @override
   void initState() {
     super.initState();
+
+    // Initialize the streamlined detection service with logging callback
+    _detectionService = StreamlinedRoomDetectionService(
+      modelConfigs: [
+        ModelConfig(
+            assetPath: 'assets/models/floorplan_v17.2.tflite', weight: 1.0),
+        ModelConfig(
+            assetPath: 'assets/models/floorplan_v12.tflite', weight: 0.75),
+      ],
+      onLog: _addLog,
+    );
+
     _addLog('Flutter Floor Plan Detection App Started');
-    _addLog('Initializing tiled room detection service...');
+    _addLog('Initializing streamlined room detection service (no tiling)...');
     _initializeModel();
   }
 
@@ -58,11 +63,11 @@ class _FloorPlanDetectionScreenState extends State<FloorPlanDetectionScreen> {
     _addLog('=== Starting Model Initialization ===');
     setState(() {
       _isLoading = true;
-      _statusMessage = 'Loading YOLO model...';
+      _statusMessage = 'Loading YOLO models...';
     });
 
     try {
-      _addLog('Loading TiledRoomDetectionService models...');
+      _addLog('Loading StreamlinedRoomDetectionService models...');
       bool success = await _detectionService.loadModels();
 
       if (success) {
@@ -70,7 +75,7 @@ class _FloorPlanDetectionScreenState extends State<FloorPlanDetectionScreen> {
         setState(() {
           _isModelLoaded = success;
           _statusMessage =
-              'Model loaded successfully. Select an image or PDF to analyze.';
+              'Models loaded. Select an image or PDF to analyze (full image processing).';
           _isLoading = false;
         });
       } else {
@@ -78,7 +83,7 @@ class _FloorPlanDetectionScreenState extends State<FloorPlanDetectionScreen> {
         setState(() {
           _isModelLoaded = success;
           _statusMessage =
-              'Failed to load model. Please ensure model files are in assets/models/';
+              'Failed to load models. Please ensure model files are in assets/models/';
           _isLoading = false;
         });
       }
@@ -86,7 +91,7 @@ class _FloorPlanDetectionScreenState extends State<FloorPlanDetectionScreen> {
       _addLog('✗ Error during model loading: $e');
       setState(() {
         _isModelLoaded = false;
-        _statusMessage = 'Error loading model: $e';
+        _statusMessage = 'Error loading models: $e';
         _isLoading = false;
       });
     }
@@ -203,56 +208,19 @@ class _FloorPlanDetectionScreenState extends State<FloorPlanDetectionScreen> {
 
     setState(() {
       _isLoading = true;
-      _statusMessage = 'Processing image...';
+      _statusMessage = 'Processing image (full image, no tiling)...';
       _selectedImage = imageFile;
       _selectedPdf = null;
       _detections = [];
     });
 
     try {
-      // Load and decode image with UI updates
-      _addLog('Step 1: Loading and decoding image file...');
-      setState(() {
-        _statusMessage = 'Loading and decoding image...';
-      });
+      // Use the streamlined service to process the full image
+      _addLog('Processing full image with streamlined detection service...');
+      _addLog('Image will be resized to 640x640 regardless of original size');
 
-      // Allow UI to update
-      await Future.delayed(const Duration(milliseconds: 100));
-
-      final Uint8List imageBytes = await imageFile.readAsBytes();
-      _addLog('Image file size: ${imageBytes.length} bytes');
-
-      final img.Image? image = img.decodeImage(imageBytes);
-
-      if (image == null) {
-        throw Exception('Failed to decode image');
-      }
-
-      _addLog(
-          '✓ Image decoded successfully: ${image.width}x${image.height} pixels');
-      setState(() {
-        _processedImage = image;
-        _statusMessage = 'Preparing for room detection...';
-      });
-
-      // Allow UI to update before starting heavy processing
-      await Future.delayed(const Duration(milliseconds: 100));
-
-      // Use the tiled room detection service for large images
-      _addLog('Step 2: Running tiled room detection...');
-      _addLog('Using TiledRoomDetectionService for large image processing');
-      _addLog(
-          'This will create tiles, run inference on each tile, and merge results');
-
-      setState(() {
-        _statusMessage = 'Running AI inference on image tiles...';
-      });
-
-      // Allow UI to update
-      await Future.delayed(const Duration(milliseconds: 100));
-
-      // Process in chunks to allow UI updates
-      final List<Detection> detections = await _processImageWithUpdates(image);
+      final List<Detection> detections =
+          await _detectionService.processImageFile(imageFile);
 
       _addLog('✓ Detection complete: ${detections.length} rooms found');
 
@@ -263,8 +231,14 @@ class _FloorPlanDetectionScreenState extends State<FloorPlanDetectionScreen> {
         _addLog('  - Image doesn\'t contain recognizable room features');
         _addLog('  - Model not trained for this type of floorplan');
       }
+
+      // Load the processed image for display
+      final imageBytes = await imageFile.readAsBytes();
+      final image = img.decodeImage(imageBytes);
+
       setState(() {
         _detections = detections;
+        _processedImage = image;
         _statusMessage = 'Found ${detections.length} room(s)';
         _isLoading = false;
       });
@@ -275,8 +249,6 @@ class _FloorPlanDetectionScreenState extends State<FloorPlanDetectionScreen> {
         final detection = detections[i];
         _addLog(
             'Room ${i + 1}: ${detection.label} (${(detection.confidence * 100).toStringAsFixed(1)}% confidence)');
-        print(
-            '  Bounding box: [${detection.left.toStringAsFixed(1)}, ${detection.top.toStringAsFixed(1)}, ${detection.width.toStringAsFixed(1)}, ${detection.height.toStringAsFixed(1)}]');
       }
       _addLog('=== Image Processing Complete ===');
     } catch (e) {
@@ -289,28 +261,13 @@ class _FloorPlanDetectionScreenState extends State<FloorPlanDetectionScreen> {
     }
   }
 
-  /// Process image with periodic UI updates and progress tracking
-  Future<List<Detection>> _processImageWithUpdates(img.Image image) async {
-    final service = _detectionService;
-
-    // Start processing with enhanced progress tracking
-    return await service.processLargeImage(image,
-        onProgress: (processed, total) {
-      if (mounted) {
-        setState(() {
-          _statusMessage = 'Processing tile $processed of $total...';
-        });
-      }
-    });
-  }
-
   Future<void> _processPdf(File pdfFile) async {
     _addLog('=== Starting PDF Processing ===');
     _addLog('Input PDF file: ${pdfFile.path}');
 
     setState(() {
       _isLoading = true;
-      _statusMessage = 'Processing PDF floorplan...';
+      _statusMessage = 'Processing PDF (full page, no tiling)...';
       _selectedPdf = pdfFile;
       _selectedImage = null;
       _detections = [];
@@ -321,46 +278,13 @@ class _FloorPlanDetectionScreenState extends State<FloorPlanDetectionScreen> {
       final fileSize = await pdfFile.length();
       _addLog('PDF file size: ${(fileSize / 1024).toStringAsFixed(1)} KB');
 
-      setState(() {
-        _statusMessage = 'Converting PDF to image...';
-      });
+      // Use the streamlined service to process the PDF
+      _addLog('Processing full PDF page with streamlined detection service...');
+      _addLog(
+          'PDF will be rendered and resized to 640x640 regardless of original size');
 
-      // Allow UI to update
-      await Future.delayed(const Duration(milliseconds: 100));
-
-      _addLog('Step 1: Converting PDF to image...');
-      _addLog('Using printing package for PDF rasterization');
-
-      // Use the tiled room detection service to process the PDF
-      _addLog('Step 2: Running tiled room detection on PDF...');
-      _addLog('This will convert PDF → Image → Tiles → Detection → Merge');
-
-      setState(() {
-        _statusMessage = 'Running AI inference on PDF tiles...';
-      });
-
-      // Allow UI to update before heavy processing
-      await Future.delayed(const Duration(milliseconds: 100));
-
-      // Process PDF with UI updates
-      final List<Detection> detections = await _processPdfWithUpdates(pdfFile);
-
-      _addLog('Step 3: Getting processed image for display...');
-      setState(() {
-        _statusMessage = 'Preparing results for display...';
-      });
-
-      // Allow UI to update
-      await Future.delayed(const Duration(milliseconds: 100));
-
-      // Get the processed image for display
-      final img.Image? processedImage =
-          await PdfProcessingService.pdfToImage(pdfFile);
-
-      if (processedImage != null) {
-        _addLog(
-            '✓ PDF converted to image: ${processedImage.width}x${processedImage.height} pixels');
-      }
+      final List<Detection> detections =
+          await _detectionService.processPDF(pdfFile);
 
       _addLog('✓ PDF processing complete: ${detections.length} rooms found');
 
@@ -373,6 +297,16 @@ class _FloorPlanDetectionScreenState extends State<FloorPlanDetectionScreen> {
         _addLog(
             '  - Model format issues (check console for shape mismatch errors)');
       }
+
+      // Get the processed image for display
+      final img.Image? processedImage =
+          await PdfProcessingService.pdfToImage(pdfFile);
+
+      if (processedImage != null) {
+        _addLog(
+            '✓ PDF converted to image: ${processedImage.width}x${processedImage.height} pixels');
+      }
+
       setState(() {
         _detections = detections;
         _processedImage = processedImage;
@@ -386,8 +320,6 @@ class _FloorPlanDetectionScreenState extends State<FloorPlanDetectionScreen> {
         final detection = detections[i];
         _addLog(
             'Room ${i + 1}: ${detection.label} (${(detection.confidence * 100).toStringAsFixed(1)}% confidence)');
-        print(
-            '  Bounding box: [${detection.left.toStringAsFixed(1)}, ${detection.top.toStringAsFixed(1)}, ${detection.width.toStringAsFixed(1)}, ${detection.height.toStringAsFixed(1)}]');
       }
       _addLog('=== PDF Processing Complete ===');
     } catch (e) {
@@ -398,18 +330,6 @@ class _FloorPlanDetectionScreenState extends State<FloorPlanDetectionScreen> {
       });
       _showErrorSnackBar('Error processing PDF: $e');
     }
-  }
-
-  /// Process PDF with periodic UI updates
-  Future<List<Detection>> _processPdfWithUpdates(File pdfFile) async {
-    return await _detectionService.processPDF(pdfFile,
-        onProgress: (processed, total) {
-      if (mounted) {
-        setState(() {
-          _statusMessage = 'Processing PDF tile $processed of $total...';
-        });
-      }
-    });
   }
 
   /// Add a log message to both console and UI
@@ -423,9 +343,20 @@ class _FloorPlanDetectionScreenState extends State<FloorPlanDetectionScreen> {
     // UI logging
     setState(() {
       _processLogs.add(logMessage);
-      // Keep only last 50 logs to prevent memory issues
-      if (_processLogs.length > 50) {
+      // Keep only last 100 logs to prevent memory issues
+      if (_processLogs.length > 100) {
         _processLogs.removeAt(0);
+      }
+    });
+
+    // Auto-scroll to bottom after a short delay
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_logScrollController.hasClients) {
+        _logScrollController.animateTo(
+          _logScrollController.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeOut,
+        );
       }
     });
   }
@@ -434,13 +365,6 @@ class _FloorPlanDetectionScreenState extends State<FloorPlanDetectionScreen> {
   void _clearLogs() {
     setState(() {
       _processLogs.clear();
-    });
-  }
-
-  /// Toggle log visibility
-  void _toggleLogs() {
-    setState(() {
-      _showLogs = !_showLogs;
     });
   }
 
@@ -460,71 +384,61 @@ class _FloorPlanDetectionScreenState extends State<FloorPlanDetectionScreen> {
         title: const Text('Floor Plan Room Detection'),
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
       ),
-      body: Column(
-        children: [
-          // Status and controls
-          Padding(
-            padding: const EdgeInsets.all(16.0),
-            child: Column(
-              children: [
-                Text(
-                  _statusMessage,
-                  style: Theme.of(context).textTheme.bodyLarge,
-                  textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: 16),
-                Wrap(
-                  spacing: 8.0,
-                  runSpacing: 8.0,
-                  alignment: WrapAlignment.center,
-                  children: [
-                    ElevatedButton.icon(
-                      onPressed: _isLoading ? null : _pickImageFromGallery,
-                      icon: const Icon(Icons.photo_library),
-                      label: const Text('Gallery'),
-                    ),
-                    ElevatedButton.icon(
-                      onPressed: _isLoading ? null : _pickImageFromCamera,
-                      icon: const Icon(Icons.camera_alt),
-                      label: const Text('Camera'),
-                    ),
-                    ElevatedButton.icon(
-                      onPressed: _isLoading ? null : _pickPdfFile,
-                      icon: const Icon(Icons.picture_as_pdf),
-                      label: const Text('PDF'),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.red.shade100,
-                        foregroundColor: Colors.red.shade700,
+      body: SingleChildScrollView(
+        child: Column(
+          children: [
+            // Status and controls
+            Padding(
+              padding: const EdgeInsets.all(16.0),
+              child: Column(
+                children: [
+                  Text(
+                    _statusMessage,
+                    style: Theme.of(context).textTheme.bodyLarge,
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 16),
+                  Wrap(
+                    spacing: 8.0,
+                    runSpacing: 8.0,
+                    alignment: WrapAlignment.center,
+                    children: [
+                      ElevatedButton.icon(
+                        onPressed: _isLoading ? null : _pickImageFromGallery,
+                        icon: const Icon(Icons.photo_library),
+                        label: const Text('Gallery'),
                       ),
-                    ),
-                    ElevatedButton.icon(
-                      onPressed: _isLoading ? null : _loadSampleImage,
-                      icon: const Icon(Icons.image),
-                      label: const Text('Sample'),
-                    ),
-                    ElevatedButton.icon(
-                      onPressed: _toggleLogs,
-                      icon: Icon(
-                          _showLogs ? Icons.expand_less : Icons.expand_more),
-                      label: Text('Logs (${_processLogs.length})'),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.grey.shade100,
-                        foregroundColor: Colors.grey.shade700,
+                      ElevatedButton.icon(
+                        onPressed: _isLoading ? null : _pickImageFromCamera,
+                        icon: const Icon(Icons.camera_alt),
+                        label: const Text('Camera'),
                       ),
-                    ),
-                  ],
-                ),
+                      ElevatedButton.icon(
+                        onPressed: _isLoading ? null : _pickPdfFile,
+                        icon: const Icon(Icons.picture_as_pdf),
+                        label: const Text('PDF'),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.red.shade100,
+                          foregroundColor: Colors.red.shade700,
+                        ),
+                      ),
+                      ElevatedButton.icon(
+                        onPressed: _isLoading ? null : _loadSampleImage,
+                        icon: const Icon(Icons.image),
+                        label: const Text('Sample'),
+                      ),
+                    ],
+                  ),
 
-                // Expandable logs section
-                if (_showLogs) ...[
+                  // Live logs section (always visible)
                   const SizedBox(height: 16),
                   Container(
-                    height: 200,
+                    height: 300, // Fixed height for logs
                     margin: const EdgeInsets.symmetric(horizontal: 8.0),
                     decoration: BoxDecoration(
-                      border: Border.all(color: Colors.grey.shade300),
+                      border: Border.all(color: Colors.blue.shade300),
                       borderRadius: BorderRadius.circular(8.0),
-                      color: Colors.grey.shade50,
+                      color: Colors.blue.shade50,
                     ),
                     child: Column(
                       children: [
@@ -533,7 +447,7 @@ class _FloorPlanDetectionScreenState extends State<FloorPlanDetectionScreen> {
                           width: double.infinity,
                           padding: const EdgeInsets.all(8.0),
                           decoration: BoxDecoration(
-                            color: Colors.grey.shade200,
+                            color: Colors.blue.shade200,
                             borderRadius: const BorderRadius.only(
                               topLeft: Radius.circular(8.0),
                               topRight: Radius.circular(8.0),
@@ -544,7 +458,7 @@ class _FloorPlanDetectionScreenState extends State<FloorPlanDetectionScreen> {
                               const Icon(Icons.terminal, size: 16),
                               const SizedBox(width: 8),
                               const Text(
-                                'Process Logs',
+                                'Live Process Logs',
                                 style: TextStyle(
                                   fontWeight: FontWeight.bold,
                                   fontSize: 14,
@@ -570,7 +484,7 @@ class _FloorPlanDetectionScreenState extends State<FloorPlanDetectionScreen> {
                           child: _processLogs.isEmpty
                               ? const Center(
                                   child: Text(
-                                    'No logs yet. Start processing to see logs.',
+                                    'Ready to process. Select an image or PDF to see live logs.',
                                     style: TextStyle(
                                       color: Colors.grey,
                                       fontStyle: FontStyle.italic,
@@ -578,6 +492,7 @@ class _FloorPlanDetectionScreenState extends State<FloorPlanDetectionScreen> {
                                   ),
                                 )
                               : ListView.builder(
+                                  controller: _logScrollController,
                                   padding: const EdgeInsets.all(8.0),
                                   itemCount: _processLogs.length,
                                   itemBuilder: (context, index) {
@@ -585,6 +500,7 @@ class _FloorPlanDetectionScreenState extends State<FloorPlanDetectionScreen> {
                                     final isError = log.contains('✗');
                                     final isSuccess = log.contains('✓');
                                     final isHeader = log.contains('===');
+                                    final isWarning = log.contains('⚠️');
 
                                     return Padding(
                                       padding:
@@ -593,14 +509,16 @@ class _FloorPlanDetectionScreenState extends State<FloorPlanDetectionScreen> {
                                         log,
                                         style: TextStyle(
                                           fontFamily: 'monospace',
-                                          fontSize: 11,
+                                          fontSize: 12,
                                           color: isError
                                               ? Colors.red.shade700
                                               : isSuccess
                                                   ? Colors.green.shade700
-                                                  : isHeader
-                                                      ? Colors.blue.shade700
-                                                      : Colors.black87,
+                                                  : isWarning
+                                                      ? Colors.orange.shade700
+                                                      : isHeader
+                                                          ? Colors.blue.shade700
+                                                          : Colors.black87,
                                           fontWeight: isHeader
                                               ? FontWeight.bold
                                               : FontWeight.normal,
@@ -613,27 +531,26 @@ class _FloorPlanDetectionScreenState extends State<FloorPlanDetectionScreen> {
                       ],
                     ),
                   ),
-                ],
-                if (_isLoading)
-                  const Padding(
-                    padding: EdgeInsets.only(top: 16.0),
-                    child: CircularProgressIndicator(),
-                  ),
-              ],
-            ),
-          ),
-
-          // Image/PDF display with detections
-          Expanded(
-            child: (_selectedImage != null || _selectedPdf != null)
-                ? Container(
-                    width: double.infinity,
-                    margin: const EdgeInsets.all(16.0),
-                    decoration: BoxDecoration(
-                      border: Border.all(color: Colors.grey),
-                      borderRadius: BorderRadius.circular(8.0),
+                  if (_isLoading)
+                    const Padding(
+                      padding: EdgeInsets.only(top: 16.0),
+                      child: CircularProgressIndicator(),
                     ),
-                    child: ClipRRect(
+                ],
+              ),
+            ),
+
+            // Image/PDF display with detections
+            Container(
+              height: 400, // Fixed height for image display
+              width: double.infinity,
+              margin: const EdgeInsets.all(16.0),
+              decoration: BoxDecoration(
+                border: Border.all(color: Colors.grey),
+                borderRadius: BorderRadius.circular(8.0),
+              ),
+              child: (_selectedImage != null || _selectedPdf != null)
+                  ? ClipRRect(
                       borderRadius: BorderRadius.circular(8.0),
                       child: Stack(
                         children: [
@@ -704,15 +621,8 @@ class _FloorPlanDetectionScreenState extends State<FloorPlanDetectionScreen> {
                             ),
                         ],
                       ),
-                    ),
-                  )
-                : Container(
-                    margin: const EdgeInsets.all(16.0),
-                    decoration: BoxDecoration(
-                      border: Border.all(color: Colors.grey),
-                      borderRadius: BorderRadius.circular(8.0),
-                    ),
-                    child: const Center(
+                    )
+                  : const Center(
                       child: Column(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
@@ -742,88 +652,45 @@ class _FloorPlanDetectionScreenState extends State<FloorPlanDetectionScreen> {
                         ],
                       ),
                     ),
-                  ),
-          ),
-
-          // Detection results summary
-          if (_detections.isNotEmpty)
-            Container(
-              width: double.infinity,
-              margin: const EdgeInsets.all(16.0),
-              padding: const EdgeInsets.all(16.0),
-              decoration: BoxDecoration(
-                color: Colors.blue.shade50,
-                borderRadius: BorderRadius.circular(8.0),
-                border: Border.all(color: Colors.blue.shade200),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'Detection Results:',
-                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                          fontWeight: FontWeight.bold,
-                          color: Colors.blue.shade800,
-                        ),
-                  ),
-                  const SizedBox(height: 8),
-                  ..._detections.map((detection) => Padding(
-                        padding: const EdgeInsets.only(bottom: 4.0),
-                        child: Text(
-                          '• ${detection.label}: ${(detection.confidence * 100).toStringAsFixed(1)}% confidence',
-                          style: TextStyle(color: Colors.blue.shade700),
-                        ),
-                      )),
-                ],
-              ),
             ),
 
-          // Logs section
-          if (_showLogs)
-            Container(
-              width: double.infinity,
-              margin: const EdgeInsets.all(16.0),
-              padding: const EdgeInsets.all(16.0),
-              decoration: BoxDecoration(
-                color: Colors.grey.shade900,
-                borderRadius: BorderRadius.circular(8.0),
-                border: Border.all(color: Colors.grey.shade700),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'Process Logs:',
-                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                          fontWeight: FontWeight.bold,
-                          color: Colors.white,
-                        ),
-                  ),
-                  const SizedBox(height: 8),
-                  SingleChildScrollView(
-                    child: Column(
-                      children: _processLogs
-                          .map(
-                            (log) => Text(
-                              log,
-                              style: TextStyle(color: Colors.grey.shade300),
-                            ),
-                          )
-                          .toList(),
+            // Detection results summary
+            if (_detections.isNotEmpty)
+              Container(
+                width: double.infinity,
+                margin: const EdgeInsets.all(16.0),
+                padding: const EdgeInsets.all(16.0),
+                decoration: BoxDecoration(
+                  color: Colors.blue.shade50,
+                  borderRadius: BorderRadius.circular(8.0),
+                  border: Border.all(color: Colors.blue.shade200),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Detection Results:',
+                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                            fontWeight: FontWeight.bold,
+                            color: Colors.blue.shade800,
+                          ),
                     ),
-                  ),
-                  const SizedBox(height: 8),
-                  ElevatedButton(
-                    onPressed: _clearLogs,
-                    child: const Text('Clear Logs'),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.red.shade700,
-                    ),
-                  ),
-                ],
+                    const SizedBox(height: 8),
+                    ..._detections.map((detection) => Padding(
+                          padding: const EdgeInsets.only(bottom: 4.0),
+                          child: Text(
+                            '• ${detection.label}: ${(detection.confidence * 100).toStringAsFixed(1)}% confidence',
+                            style: TextStyle(color: Colors.blue.shade700),
+                          ),
+                        )),
+                  ],
+                ),
               ),
-            ),
-        ],
+
+            // Add some bottom padding to ensure content doesn't get cut off
+            const SizedBox(height: 32),
+          ],
+        ),
       ),
     );
   }
