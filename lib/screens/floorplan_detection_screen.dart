@@ -6,7 +6,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:image/image.dart' as img;
-import '../services/streamlined_room_detection_service.dart';
+import '../services/base_room_detection_service.dart';
+import '../services/room_detection_service_factory.dart';
 import '../services/pdf_processing_service.dart';
 import '../widgets/detection_overlay.dart';
 
@@ -19,7 +20,7 @@ class FloorPlanDetectionScreen extends StatefulWidget {
 }
 
 class _FloorPlanDetectionScreenState extends State<FloorPlanDetectionScreen> {
-  late final StreamlinedRoomDetectionService _detectionService;
+  BaseRoomDetectionService? _detectionService;
   final ImagePicker _imagePicker = ImagePicker();
   final ScrollController _logScrollController = ScrollController();
 
@@ -32,12 +33,23 @@ class _FloorPlanDetectionScreenState extends State<FloorPlanDetectionScreen> {
   String _statusMessage = 'Initializing...';
   final List<String> _processLogs = [];
 
+  // Service selection
+  DetectionServiceType _selectedServiceType = DetectionServiceType.streamlined;
+
   @override
   void initState() {
     super.initState();
+    _addLog('Flutter Floor Plan Detection App Started');
+    _initializeService();
+  }
 
-    // Initialize the streamlined detection service with logging callback
-    _detectionService = StreamlinedRoomDetectionService(
+  void _initializeService() {
+    _addLog(
+        'Initializing ${RoomDetectionServiceFactory.getServiceDescription(_selectedServiceType)}...');
+
+    // Create service using factory
+    _detectionService = RoomDetectionServiceFactory.createService(
+      serviceType: _selectedServiceType,
       modelConfigs: [
         ModelConfig(
             assetPath: 'assets/models/floorplan_v17.2.tflite', weight: 1.0),
@@ -47,15 +59,29 @@ class _FloorPlanDetectionScreenState extends State<FloorPlanDetectionScreen> {
       onLog: _addLog,
     );
 
-    _addLog('Flutter Floor Plan Detection App Started');
-    _addLog('Initializing streamlined room detection service (no tiling)...');
     _initializeModel();
+  }
+
+  void _switchService(DetectionServiceType newServiceType) {
+    if (newServiceType == _selectedServiceType) return;
+
+    setState(() {
+      _selectedServiceType = newServiceType;
+      _isModelLoaded = false;
+      _statusMessage = 'Switching services...';
+    });
+
+    // Dispose old service
+    _detectionService?.dispose();
+
+    // Initialize new service
+    _initializeService();
   }
 
   @override
   void dispose() {
     _addLog('Disposing resources and closing app...');
-    _detectionService.dispose();
+    _detectionService?.dispose();
     super.dispose();
   }
 
@@ -67,15 +93,16 @@ class _FloorPlanDetectionScreenState extends State<FloorPlanDetectionScreen> {
     });
 
     try {
-      _addLog('Loading StreamlinedRoomDetectionService models...');
-      bool success = await _detectionService.loadModels();
+      _addLog(
+          'Loading ${RoomDetectionServiceFactory.getServiceDescription(_selectedServiceType)} models...');
+      bool success = await _detectionService!.loadModels();
 
       if (success) {
         _addLog('✓ All models loaded successfully');
         setState(() {
           _isModelLoaded = success;
           _statusMessage =
-              'Models loaded. Select an image or PDF to analyze (full image processing).';
+              'Models loaded. Select an image or PDF to analyze with ${RoomDetectionServiceFactory.getServiceDescription(_selectedServiceType)}.';
           _isLoading = false;
         });
       } else {
@@ -220,7 +247,7 @@ class _FloorPlanDetectionScreenState extends State<FloorPlanDetectionScreen> {
       _addLog('Image will be resized to 640x640 regardless of original size');
 
       final List<Detection> detections =
-          await _detectionService.processImageFile(imageFile);
+          await _detectionService!.processImageFile(imageFile);
 
       _addLog('✓ Detection complete: ${detections.length} rooms found');
 
@@ -286,7 +313,7 @@ class _FloorPlanDetectionScreenState extends State<FloorPlanDetectionScreen> {
           'PDF will be rendered and resized to 640x640 regardless of original size');
 
       final List<Detection> detections =
-          await _detectionService.processPDF(pdfFile);
+          await _detectionService!.processPDF(pdfFile);
 
       _addLog('✓ PDF processing complete: ${detections.length} rooms found');
 
@@ -381,6 +408,15 @@ class _FloorPlanDetectionScreenState extends State<FloorPlanDetectionScreen> {
     );
   }
 
+  String _getServiceDetails(DetectionServiceType type) {
+    switch (type) {
+      case DetectionServiceType.streamlined:
+        return 'Best for small-medium images. Faster processing, full image resize to 640x640.';
+      case DetectionServiceType.tiled:
+        return 'Best for large images. Processes in overlapping tiles, preserves detail.';
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -434,10 +470,81 @@ class _FloorPlanDetectionScreenState extends State<FloorPlanDetectionScreen> {
                     ],
                   ),
 
+                  // Service Selection
+                  if (!_isLoading) ...[
+                    Card(
+                      child: Padding(
+                        padding: const EdgeInsets.all(16.0),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'Detection Service:',
+                              style: Theme.of(context).textTheme.titleMedium,
+                            ),
+                            const SizedBox(height: 8),
+                            Container(
+                              constraints: const BoxConstraints(maxHeight: 56),
+                              child: DropdownButton<DetectionServiceType>(
+                                value: _selectedServiceType,
+                                isExpanded: true,
+                                onChanged: (DetectionServiceType? newValue) {
+                                  if (newValue != null) {
+                                    _switchService(newValue);
+                                  }
+                                },
+                                items: DetectionServiceType.values
+                                    .map((DetectionServiceType type) {
+                                  return DropdownMenuItem<DetectionServiceType>(
+                                    value: type,
+                                    child: Tooltip(
+                                      message: _getServiceDetails(type),
+                                      child: Text(
+                                        RoomDetectionServiceFactory
+                                            .getServiceDescription(type),
+                                        overflow: TextOverflow.ellipsis,
+                                        maxLines: 1,
+                                      ),
+                                    ),
+                                  );
+                                }).toList(),
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            Container(
+                              width: double.infinity,
+                              padding: const EdgeInsets.all(8.0),
+                              decoration: BoxDecoration(
+                                color: Colors.blue.shade50,
+                                borderRadius: BorderRadius.circular(4.0),
+                                border: Border.all(color: Colors.blue.shade200),
+                              ),
+                              child: Text(
+                                _getServiceDetails(_selectedServiceType),
+                                style: Theme.of(context)
+                                    .textTheme
+                                    .bodySmall
+                                    ?.copyWith(
+                                      color: Colors.grey[700],
+                                    ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                  ],
+
                   // Live logs section (always visible)
                   const SizedBox(height: 16),
                   Container(
-                    height: 300, // Fixed height for logs
+                    height: MediaQuery.of(context).size.height *
+                        0.35, // Dynamic height based on screen size
+                    constraints: const BoxConstraints(
+                      minHeight: 200,
+                      maxHeight: 400,
+                    ),
                     margin: const EdgeInsets.symmetric(horizontal: 8.0),
                     decoration: BoxDecoration(
                       border: Border.all(color: Colors.blue.shade300),
@@ -546,7 +653,12 @@ class _FloorPlanDetectionScreenState extends State<FloorPlanDetectionScreen> {
 
             // Image/PDF display with detections
             Container(
-              height: 400, // Fixed height for image display
+              height: MediaQuery.of(context).size.height *
+                  0.4, // Dynamic height based on screen size
+              constraints: const BoxConstraints(
+                minHeight: 300,
+                maxHeight: 500,
+              ),
               width: double.infinity,
               margin: const EdgeInsets.all(16.0),
               decoration: BoxDecoration(

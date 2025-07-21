@@ -2,14 +2,14 @@ import 'dart:io';
 import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:floorplan_detection_app/interfaces/detection.dart';
-import 'package:floorplan_detection_app/interfaces/model_config.dart';
 import 'package:floorplan_detection_app/services/pdf_processing_service.dart';
+import 'package:floorplan_detection_app/services/base_room_detection_service.dart';
 import 'package:tflite_flutter/tflite_flutter.dart';
 import 'package:image/image.dart' as img;
 
 /// Streamlined room detection service without tiling
 /// Processes entire images resized to 640x640 for direct model inference
-class StreamlinedRoomDetectionService {
+class StreamlinedRoomDetectionService extends BaseRoomDetectionService {
   static const int inputSize = 640;
   static const double confidenceThreshold =
       0.1; // Lowered from 0.3 to catch more detections
@@ -21,88 +21,91 @@ class StreamlinedRoomDetectionService {
     'room', // Single class model
   ];
 
-  final List<ModelConfig> modelConfigs;
   final List<Interpreter> _interpreters = [];
   bool _isModelLoaded = false;
-  Function(String)? onLog;
 
   StreamlinedRoomDetectionService({
-    required this.modelConfigs,
-    this.onLog,
+    required super.modelConfigs,
+    super.onLog,
   });
 
   /// Load all models asynchronously
+  @override
   Future<bool> loadModels() async {
     try {
-      _log('Loading ${modelConfigs.length} model(s)...');
+      logMessage('Loading ${modelConfigs.length} model(s)...');
 
       for (int i = 0; i < modelConfigs.length; i++) {
         final config = modelConfigs[i];
-        _log('Loading model ${i + 1}: ${config.assetPath}');
+        logMessage('Loading model ${i + 1}: ${config.assetPath}');
 
         final interpreter = await Interpreter.fromAsset(config.assetPath);
         _interpreters.add(interpreter);
 
-        _log('✓ Model ${i + 1} loaded successfully');
+        logMessage('✓ Model ${i + 1} loaded successfully');
       }
 
       _isModelLoaded = true;
-      _log('✓ All ${_interpreters.length} models loaded successfully');
+      logMessage('✓ All ${_interpreters.length} models loaded successfully');
       return true;
     } catch (e) {
-      _log('✗ Failed to load models: $e');
+      logMessage('✗ Failed to load models: $e');
       _isModelLoaded = false;
       return false;
     }
   }
 
+  @override
   bool get isModelLoaded => _isModelLoaded;
 
   /// Process a PDF file by rendering it to a single 640x640 image
+  @override
   Future<List<Detection>> processPDF(File pdfFile, {double dpi = 150.0}) async {
     try {
-      _log('=== Starting PDF Processing ===');
-      _log('Input PDF: ${pdfFile.path}');
+      logMessage('=== Starting PDF Processing ===');
+      logMessage('Input PDF: ${pdfFile.path}');
 
       // Step 1: Convert PDF to image
-      _log('Converting PDF to image (DPI: $dpi)...');
+      logMessage('Converting PDF to image (DPI: $dpi)...');
       final image = await PdfProcessingService.pdfToImage(pdfFile, dpi: dpi);
       if (image == null) {
         throw Exception('Failed to convert PDF to image');
       }
 
-      _log('✓ PDF converted to image: ${image.width}x${image.height} pixels');
+      logMessage(
+          '✓ PDF converted to image: ${image.width}x${image.height} pixels');
 
       // Step 2: Process the full image
       return await processFullImage(image);
     } catch (e) {
-      _log('✗ Error processing PDF: $e');
+      logMessage('✗ Error processing PDF: $e');
       rethrow;
     }
   }
 
   /// Process a regular image file
+  @override
   Future<List<Detection>> processImageFile(File imageFile) async {
     try {
-      _log('=== Starting Image Processing ===');
-      _log('Input image: ${imageFile.path}');
+      logMessage('=== Starting Image Processing ===');
+      logMessage('Input image: ${imageFile.path}');
 
       // Step 1: Load and decode image
-      _log('Loading and decoding image...');
+      logMessage('Loading and decoding image...');
       final imageBytes = await imageFile.readAsBytes();
-      _log('Image file size: ${imageBytes.length} bytes');
+      logMessage('Image file size: ${imageBytes.length} bytes');
 
       final image = await compute(_decodeImage, imageBytes);
       if (image == null) {
         throw Exception('Failed to decode image');
       }
 
-      _log('✓ Image decoded: ${image.width}x${image.height} pixels');
+      logMessage('✓ Image decoded: ${image.width}x${image.height} pixels');
 
       // Step 2: Process the full image
       return await processFullImage(image);
     } catch (e) {
-      _log('✗ Error processing image: $e');
+      logMessage('✗ Error processing image: $e');
       rethrow;
     }
   }
@@ -110,43 +113,46 @@ class StreamlinedRoomDetectionService {
   /// Process a full image by resizing to 640x640 and running inference
   Future<List<Detection>> processFullImage(img.Image image) async {
     try {
-      _log('Processing full image: ${image.width}x${image.height} pixels');
+      logMessage(
+          'Processing full image: ${image.width}x${image.height} pixels');
 
       // Step 1: Resize image to 640x640 (regardless of aspect ratio)
-      _log('Resizing image to ${inputSize}x$inputSize pixels...');
+      logMessage('Resizing image to ${inputSize}x$inputSize pixels...');
       final resizedImage = await compute(_resizeImage, {
         'image': image,
         'size': inputSize,
       });
 
-      _log('✓ Image resized to ${resizedImage.width}x${resizedImage.height}');
+      logMessage(
+          '✓ Image resized to ${resizedImage.width}x${resizedImage.height}');
 
       // Step 2: Run inference asynchronously
-      _log('Starting model inference...');
+      logMessage('Starting model inference...');
       final detections = await _runInferenceAsync(resizedImage, image);
 
-      _log('✓ Inference completed: ${detections.length} detections found');
+      logMessage(
+          '✓ Inference completed: ${detections.length} detections found');
 
       // Log detection results
       if (detections.isEmpty) {
-        _log('⚠️ No rooms detected. This could be due to:');
-        _log(
+        logMessage('⚠️ No rooms detected. This could be due to:');
+        logMessage(
             '  - Model confidence threshold too low (current: $confidenceThreshold)');
-        _log('  - Image doesn\'t contain recognizable room features');
-        _log('  - Model not suitable for this type of floorplan');
-        _log('  - Single-class model may need different preprocessing');
+        logMessage('  - Image doesn\'t contain recognizable room features');
+        logMessage('  - Model not suitable for this type of floorplan');
+        logMessage('  - Single-class model may need different preprocessing');
       } else {
-        _log('=== Detection Results ===');
+        logMessage('=== Detection Results ===');
         for (int i = 0; i < detections.length; i++) {
           final detection = detections[i];
-          _log(
+          logMessage(
               'Room ${i + 1}: ${detection.label} (${(detection.confidence * 100).toStringAsFixed(1)}% confidence)');
         }
       }
 
       return detections;
     } catch (e) {
-      _log('✗ Error during inference: $e');
+      logMessage('✗ Error during inference: $e');
       rethrow;
     }
   }
@@ -160,9 +166,9 @@ class StreamlinedRoomDetectionService {
       }
 
       // Preprocess image in isolate to avoid blocking UI
-      _log('Preprocessing image for model input...');
+      logMessage('Preprocessing image for model input...');
       final preprocessedData = await compute(_preprocessImage, resizedImage);
-      _log('✓ Image preprocessing completed');
+      logMessage('✓ Image preprocessing completed');
 
       List<Detection> allDetections = [];
 
@@ -171,25 +177,27 @@ class StreamlinedRoomDetectionService {
         final interpreter = _interpreters[i];
         final weight = modelConfigs[i].weight;
 
-        _log('Running inference on model ${i + 1}/${_interpreters.length}...');
+        logMessage(
+            'Running inference on model ${i + 1}/${_interpreters.length}...');
 
         try {
           // Get input and output tensor information
           final inputTensor = interpreter.getInputTensor(0);
           final outputTensors = interpreter.getOutputTensors();
 
-          _log('Model ${i + 1} input shape: ${inputTensor.shape}');
-          _log('Model ${i + 1} input type: ${inputTensor.type}');
-          _log('Model ${i + 1} has ${outputTensors.length} output tensor(s)');
+          logMessage('Model ${i + 1} input shape: ${inputTensor.shape}');
+          logMessage('Model ${i + 1} input type: ${inputTensor.type}');
+          logMessage(
+              'Model ${i + 1} has ${outputTensors.length} output tensor(s)');
 
           for (int j = 0; j < outputTensors.length; j++) {
             final tensor = outputTensors[j];
-            _log('Model ${i + 1} output $j shape: ${tensor.shape}');
-            _log('Model ${i + 1} output $j type: ${tensor.type}');
+            logMessage('Model ${i + 1} output $j shape: ${tensor.shape}');
+            logMessage('Model ${i + 1} output $j type: ${tensor.type}');
           }
 
           // Try different input formats based on what the model expects
-          _log('Attempting inference with different input formats...');
+          logMessage('Attempting inference with different input formats...');
 
           // Create output buffer(s) - support both detection and segmentation models
           final outputs = _createOutputBuffers(interpreter);
@@ -202,49 +210,50 @@ class StreamlinedRoomDetectionService {
           // Try Float32List format first (most efficient)
           try {
             final inputData = preprocessedData['float32List'] as Float32List;
-            _log('Trying Float32List format (${inputData.length} elements)...');
+            logMessage(
+                'Trying Float32List format (${inputData.length} elements)...');
 
             // Always use the main output buffer for single output models
             // For multi-output models, TF Lite should handle it automatically
             interpreter.run(inputData, outputs[0]);
 
-            _log(
+            logMessage(
                 '✓ Model ${i + 1} inference completed with Float32List format');
             inferenceSuccess = true;
           } catch (e) {
             errorMessage = 'Float32List: $e';
-            _log('Float32List format failed: $e');
+            logMessage('Float32List format failed: $e');
 
             // Try nested list format as fallback
             try {
               final inputData = preprocessedData['nestedList'];
-              _log('Trying nested list format...');
+              logMessage('Trying nested list format...');
 
               interpreter.run(inputData, outputs[0]);
 
-              _log(
+              logMessage(
                   '✓ Model ${i + 1} inference completed with nested list format');
               inferenceSuccess = true;
             } catch (e2) {
               errorMessage += ', Nested list: $e2';
-              _log('Nested list format also failed: $e2');
+              logMessage('Nested list format also failed: $e2');
 
               // Try with different tensor input approach
               try {
                 final inputData =
                     preprocessedData['float32List'] as Float32List;
-                _log('Trying alternative tensor input...');
+                logMessage('Trying alternative tensor input...');
                 // Reshape the data into proper tensor format
                 final reshapedInput = [inputData];
 
                 interpreter.run(reshapedInput, outputs[0]);
 
-                _log(
+                logMessage(
                     '✓ Model ${i + 1} inference completed with reshaped tensor');
                 inferenceSuccess = true;
               } catch (e3) {
                 errorMessage += ', Reshaped: $e3';
-                _log(
+                logMessage(
                     'All input formats failed for model ${i + 1}: $errorMessage');
                 // Don't throw exception here, continue with next model
               }
@@ -252,20 +261,20 @@ class StreamlinedRoomDetectionService {
           }
 
           if (!inferenceSuccess) {
-            _log(
+            logMessage(
                 '✗ Model ${i + 1} inference failed with all formats: $errorMessage');
             continue; // Skip this model and try the next one
           }
 
           // Verify output is not null
           if (outputs.isEmpty || outputs[0] == null) {
-            _log('✗ Model ${i + 1} produced null output');
+            logMessage('✗ Model ${i + 1} produced null output');
             continue;
           }
 
           // Log segmentation capability
           if (hasSegmentation) {
-            _log(
+            logMessage(
                 '✓ Model ${i + 1} supports segmentation (${outputTensors.length} outputs)');
           }
 
@@ -275,7 +284,7 @@ class StreamlinedRoomDetectionService {
             // For multi-output models, we need to get the data from the second output tensor
             final maskTensor = interpreter.getOutputTensor(1);
             final maskShape = maskTensor.shape;
-            _log('Segmentation output shape: $maskShape');
+            logMessage('Segmentation output shape: $maskShape');
 
             // Create buffer for mask output
             if (maskShape.length == 4) {
@@ -306,7 +315,7 @@ class StreamlinedRoomDetectionService {
                   }
                 }
               } catch (e) {
-                _log('Warning: Could not extract segmentation data: $e');
+                logMessage('Warning: Could not extract segmentation data: $e');
                 maskOutput = null;
               }
             }
@@ -325,35 +334,36 @@ class StreamlinedRoomDetectionService {
             'hasSegmentation': hasSegmentation,
           });
 
-          _log('Model ${i + 1} produced ${modelDetections.length} detections');
+          logMessage(
+              'Model ${i + 1} produced ${modelDetections.length} detections');
           allDetections.addAll(modelDetections);
         } catch (e, stackTrace) {
-          _log('✗ Model ${i + 1} inference failed: $e');
-          _log(
+          logMessage('✗ Model ${i + 1} inference failed: $e');
+          logMessage(
               'Stack trace: ${stackTrace.toString().split('\n').take(3).join('\n')}');
           // Continue with other models
         }
       }
 
       // Apply NMS and final processing
-      _log('Applying non-maximum suppression...');
-      _log('Total raw detections before NMS: ${allDetections.length}');
+      logMessage('Applying non-maximum suppression...');
+      logMessage('Total raw detections before NMS: ${allDetections.length}');
 
       if (allDetections.isEmpty) {
-        _log('⚠️ No detections found from any model');
+        logMessage('⚠️ No detections found from any model');
         return <Detection>[]; // Return empty list instead of throwing
       }
 
       final averagedDetections = _averageOverlappingBoxes(allDetections);
-      _log('Detections after averaging: ${averagedDetections.length}');
+      logMessage('Detections after averaging: ${averagedDetections.length}');
       final finalDetections = _applyNMS(averagedDetections);
-      _log(
+      logMessage(
           '✓ Final processing completed: ${finalDetections.length} detections');
 
       return finalDetections;
     } catch (e, stackTrace) {
-      _log('✗ Inference failed: $e');
-      _log(
+      logMessage('✗ Inference failed: $e');
+      logMessage(
           'Full stack trace: ${stackTrace.toString().split('\n').take(5).join('\n')}');
       // Return empty list instead of crashing the app
       return <Detection>[];
@@ -361,21 +371,14 @@ class StreamlinedRoomDetectionService {
   }
 
   /// Dispose resources
+  @override
   void dispose() {
-    _log('Disposing detection service resources...');
+    logMessage('Disposing detection service resources...');
     for (final interpreter in _interpreters) {
       interpreter.close();
     }
     _interpreters.clear();
     _isModelLoaded = false;
-  }
-
-  /// Helper method for logging
-  void _log(String message) {
-    if (onLog != null) {
-      onLog!(message);
-    }
-    print(message); // Also log to console
   }
 
   // Static methods for isolate processing
