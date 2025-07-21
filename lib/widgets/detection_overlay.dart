@@ -18,6 +18,10 @@ class DetectionOverlayPainter extends CustomPainter {
       ..style = PaintingStyle.stroke
       ..strokeWidth = 3.0;
 
+    final maskPaint = Paint()
+      ..color = Colors.blue.withOpacity(0.3)
+      ..style = PaintingStyle.fill;
+
     final textPainter = TextPainter(
       textDirection: TextDirection.ltr,
     );
@@ -33,14 +37,32 @@ class DetectionOverlayPainter extends CustomPainter {
       double width = detection.width * scaleX;
       double height = detection.height * scaleY;
 
+      // Draw segmentation mask if available
+      if (detection is SegmentationDetection && detection.mask.isNotEmpty) {
+        _drawSegmentationMask(
+            canvas, detection.mask, left, top, width, height, maskPaint);
+      }
+
       // Draw bounding box
       final rect = Rect.fromLTWH(left, top, width, height);
       canvas.drawRect(rect, paint);
 
       // Draw label with confidence
-      final label =
+      String label =
           '${detection.label} ${(detection.confidence * 100).toStringAsFixed(1)}%';
+      if (detection is SegmentationDetection) {
+        label += ' (segmented)';
+      }
 
+      textPainter.text = TextSpan(
+        text: label,
+        style: const TextStyle(
+          color: Colors.red,
+          fontSize: 16,
+          fontWeight: FontWeight.bold,
+          backgroundColor: Colors.white,
+        ),
+      );
       textPainter.text = TextSpan(
         text: label,
         style: const TextStyle(
@@ -77,6 +99,40 @@ class DetectionOverlayPainter extends CustomPainter {
       );
 
       textPainter.paint(canvas, Offset(labelX, labelY));
+    }
+  }
+
+  /// Draw segmentation mask overlay
+  void _drawSegmentationMask(Canvas canvas, List<List<double>> mask,
+      double left, double top, double width, double height, Paint maskPaint) {
+    if (mask.isEmpty || mask[0].isEmpty) return;
+
+    final maskHeight = mask.length;
+    final maskWidth = mask[0].length;
+
+    final cellWidth = width / maskWidth;
+    final cellHeight = height / maskHeight;
+
+    for (int y = 0; y < maskHeight; y++) {
+      for (int x = 0; x < maskWidth; x++) {
+        final maskValue = mask[y][x];
+
+        // Only draw pixels above threshold (0.5)
+        if (maskValue > 0.5) {
+          final cellLeft = left + x * cellWidth;
+          final cellTop = top + y * cellHeight;
+
+          final cellRect =
+              Rect.fromLTWH(cellLeft, cellTop, cellWidth, cellHeight);
+
+          // Vary opacity based on mask confidence
+          final paint = Paint()
+            ..color = Colors.blue.withOpacity(maskValue * 0.5)
+            ..style = PaintingStyle.fill;
+
+          canvas.drawRect(cellRect, paint);
+        }
+      }
     }
   }
 

@@ -25,3 +25,27 @@ class Detection {
         '${width.toStringAsFixed(1)}, ${height.toStringAsFixed(1)}])';
   }
 }
+
+/// Extended detection class for segmentation models with masks
+class SegmentationDetection extends Detection {
+  final List<List<double>> mask;
+
+  SegmentationDetection({
+    required super.left,
+    required super.top,
+    required super.width,
+    required super.height,
+    required super.confidence,
+    required super.classId,
+    required super.label,
+    required this.mask,
+  });
+
+  @override
+  String toString() {
+    return 'SegmentationDetection(label: $label, confidence: ${confidence.toStringAsFixed(2)}, '
+        'box: [${left.toStringAsFixed(1)}, ${top.toStringAsFixed(1)}, '
+        '${width.toStringAsFixed(1)}, ${height.toStringAsFixed(1)}], '
+        'mask: ${mask.length}x${mask.isNotEmpty ? mask[0].length : 0})';
+  }
+}
