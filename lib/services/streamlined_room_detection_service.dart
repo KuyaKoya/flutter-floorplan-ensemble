@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:floorplan_detection_app/interfaces/detection.dart';
 import 'package:floorplan_detection_app/interfaces/model_config.dart';
@@ -175,18 +176,24 @@ class StreamlinedRoomDetectionService {
         try {
           // Get input and output tensor information
           final inputTensor = interpreter.getInputTensor(0);
-          final outputTensor = interpreter.getOutputTensor(0);
+          final outputTensors = interpreter.getOutputTensors();
 
           _log('Model ${i + 1} input shape: ${inputTensor.shape}');
           _log('Model ${i + 1} input type: ${inputTensor.type}');
-          _log('Model ${i + 1} output shape: ${outputTensor.shape}');
-          _log('Model ${i + 1} output type: ${outputTensor.type}');
+          _log('Model ${i + 1} has ${outputTensors.length} output tensor(s)');
+
+          for (int j = 0; j < outputTensors.length; j++) {
+            final tensor = outputTensors[j];
+            _log('Model ${i + 1} output $j shape: ${tensor.shape}');
+            _log('Model ${i + 1} output $j type: ${tensor.type}');
+          }
 
           // Try different input formats based on what the model expects
           _log('Attempting inference with different input formats...');
 
-          // Create output buffer
-          final output = _createOutputBuffer(outputTensor.shape);
+          // Create output buffer(s) - support both detection and segmentation models
+          final outputs = _createOutputBuffers(interpreter);
+          final hasSegmentation = outputTensors.length > 1;
 
           // Run inference with error handling for different input formats
           bool inferenceSuccess = false;
@@ -196,7 +203,11 @@ class StreamlinedRoomDetectionService {
           try {
             final inputData = preprocessedData['float32List'] as Float32List;
             _log('Trying Float32List format (${inputData.length} elements)...');
-            interpreter.run(inputData, output);
+
+            // Always use the main output buffer for single output models
+            // For multi-output models, TF Lite should handle it automatically
+            interpreter.run(inputData, outputs[0]);
+
             _log(
                 '✓ Model ${i + 1} inference completed with Float32List format');
             inferenceSuccess = true;
@@ -208,7 +219,9 @@ class StreamlinedRoomDetectionService {
             try {
               final inputData = preprocessedData['nestedList'];
               _log('Trying nested list format...');
-              interpreter.run(inputData, output);
+
+              interpreter.run(inputData, outputs[0]);
+
               _log(
                   '✓ Model ${i + 1} inference completed with nested list format');
               inferenceSuccess = true;
@@ -223,7 +236,9 @@ class StreamlinedRoomDetectionService {
                 _log('Trying alternative tensor input...');
                 // Reshape the data into proper tensor format
                 final reshapedInput = [inputData];
-                interpreter.run(reshapedInput, output);
+
+                interpreter.run(reshapedInput, outputs[0]);
+
                 _log(
                     '✓ Model ${i + 1} inference completed with reshaped tensor');
                 inferenceSuccess = true;
@@ -243,19 +258,71 @@ class StreamlinedRoomDetectionService {
           }
 
           // Verify output is not null
-          if (output == null) {
+          if (outputs.isEmpty || outputs[0] == null) {
             _log('✗ Model ${i + 1} produced null output');
             continue;
           }
 
+          // Log segmentation capability
+          if (hasSegmentation) {
+            _log(
+                '✓ Model ${i + 1} supports segmentation (${outputTensors.length} outputs)');
+          }
+
+          // Get segmentation output if available
+          dynamic maskOutput = null;
+          if (hasSegmentation && outputTensors.length > 1) {
+            // For multi-output models, we need to get the data from the second output tensor
+            final maskTensor = interpreter.getOutputTensor(1);
+            final maskShape = maskTensor.shape;
+            _log('Segmentation output shape: $maskShape');
+
+            // Create buffer for mask output
+            if (maskShape.length == 4) {
+              // 4D format: [batch, height, width, channels]
+              maskOutput = List.generate(
+                  maskShape[0],
+                  (b) => List.generate(
+                      maskShape[1],
+                      (h) => List.generate(maskShape[2],
+                          (w) => List.filled(maskShape[3], 0.0))));
+
+              // Copy data from tensor (this is a simplified approach)
+              // In practice, TensorFlow Lite may require different data access methods
+              try {
+                final maskData = maskTensor.data;
+                if (maskData is Float32List) {
+                  int index = 0;
+                  for (int b = 0; b < maskShape[0]; b++) {
+                    for (int h = 0; h < maskShape[1]; h++) {
+                      for (int w = 0; w < maskShape[2]; w++) {
+                        for (int c = 0; c < maskShape[3]; c++) {
+                          if (index < maskData.length) {
+                            maskOutput[b][h][w][c] = maskData[index++];
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              } catch (e) {
+                _log('Warning: Could not extract segmentation data: $e');
+                maskOutput = null;
+              }
+            }
+          }
+
           // Post-process detections in isolate
           final modelDetections = await compute(_postprocessDetections, {
-            'output': output,
-            'outputShape': outputTensor.shape,
+            'output': outputs[0], // Detection output
+            'maskOutput':
+                maskOutput, // Segmentation output (null if not available)
+            'outputShape': outputTensors[0].shape,
             'originalWidth': originalImage.width.toDouble(),
             'originalHeight': originalImage.height.toDouble(),
             'weight': weight,
             'confidenceThreshold': confidenceThreshold,
+            'hasSegmentation': hasSegmentation,
           });
 
           _log('Model ${i + 1} produced ${modelDetections.length} detections');
@@ -385,19 +452,23 @@ class StreamlinedRoomDetectionService {
     }
   }
 
-  /// Post-process detections in isolate
+  /// Post-process detections in isolate (supports both detection and segmentation)
   static List<Detection> _postprocessDetections(Map<String, dynamic> params) {
     final output = params['output'];
+    final maskOutput =
+        params['maskOutput']; // Can be null for detection-only models
     final outputShape = params['outputShape'] as List<int>;
     final originalWidth = params['originalWidth'] as double;
     final originalHeight = params['originalHeight'] as double;
     final weight = params['weight'] as double;
     final confThreshold = params['confidenceThreshold'] as double;
+    final hasSegmentation = params['hasSegmentation'] as bool;
 
     List<Detection> detections = [];
 
     try {
       print('Postprocessing: Output shape = $outputShape');
+      print('Has segmentation: $hasSegmentation');
 
       if (outputShape.length == 3) {
         // Handle both YOLOv5 [1, num_detections, num_features] and YOLOv8 transposed [1, num_features, num_detections]
@@ -409,21 +480,48 @@ class StreamlinedRoomDetectionService {
         if (dim1 > dim2) {
           // YOLOv5 format: [1, 25200, 85] - more detections than features
           print('Processing as YOLOv5 format');
-          _processYOLOv5Format(output, dim1, dim2, originalWidth,
-              originalHeight, weight, detections, confThreshold);
+          _processYOLOv5Format(
+              output,
+              dim1,
+              dim2,
+              originalWidth,
+              originalHeight,
+              weight,
+              detections,
+              confThreshold,
+              maskOutput,
+              hasSegmentation);
         } else {
           // YOLOv8 format: [1, 37, 8400] - more detections than features (transposed)
           print('Processing as YOLOv8 format (single-class room model)');
-          _processYOLOv8Format(output, dim1, dim2, originalWidth,
-              originalHeight, weight, detections, confThreshold);
+          _processYOLOv8Format(
+              output,
+              dim1,
+              dim2,
+              originalWidth,
+              originalHeight,
+              weight,
+              detections,
+              confThreshold,
+              maskOutput,
+              hasSegmentation);
         }
       } else if (outputShape.length == 2) {
         // Direct 2D format: [num_features, num_detections]
         final numFeatures = outputShape[0];
         final numDetections = outputShape[1];
         print('Processing as 2D YOLOv8 format');
-        _processYOLOv8Format(output, numFeatures, numDetections, originalWidth,
-            originalHeight, weight, detections, confThreshold);
+        _processYOLOv8Format(
+            output,
+            numFeatures,
+            numDetections,
+            originalWidth,
+            originalHeight,
+            weight,
+            detections,
+            confThreshold,
+            maskOutput,
+            hasSegmentation);
       } else {
         throw Exception('Unsupported output shape: $outputShape');
       }
@@ -437,7 +535,7 @@ class StreamlinedRoomDetectionService {
     return detections;
   }
 
-  /// Process YOLOv5 format detections
+  /// Process YOLOv5 format detections (with optional segmentation support)
   static void _processYOLOv5Format(
       dynamic output,
       int numDetections,
@@ -446,32 +544,34 @@ class StreamlinedRoomDetectionService {
       double originalHeight,
       double weight,
       List<Detection> detections,
-      double confThreshold) {
+      double confThreshold,
+      [dynamic maskOutput,
+      bool hasSegmentation = false]) {
     for (int i = 0; i < numDetections; i++) {
       try {
         // Safely access output values with null checks
-        final detection = output[0]?[i];
-        if (detection == null || detection.length < 5) continue;
+        final detectionData = output[0]?[i];
+        if (detectionData == null || detectionData.length < 5) continue;
 
-        final objectness = detection[4]?.toDouble() ?? 0.0;
+        final objectness = detectionData[4]?.toDouble() ?? 0.0;
 
         if (objectness * weight > confThreshold) {
           // For single-class model, use objectness as confidence or check if there's a class score
           double finalConfidence = objectness * weight;
 
           // If there are class scores beyond index 5, use the first (and likely only) class
-          if (numFeatures > 5 && detection.length > 5) {
-            final classScore = detection[5]?.toDouble() ??
+          if (numFeatures > 5 && detectionData.length > 5) {
+            final classScore = detectionData[5]?.toDouble() ??
                 1.0; // Default to 1.0 for single class
             finalConfidence = objectness * classScore * weight;
           }
 
           if (finalConfidence > confThreshold) {
             // Convert from center format to corner format
-            final centerX = detection[0]?.toDouble() ?? 0.0;
-            final centerY = detection[1]?.toDouble() ?? 0.0;
-            final width = detection[2]?.toDouble() ?? 0.0;
-            final height = detection[3]?.toDouble() ?? 0.0;
+            final centerX = detectionData[0]?.toDouble() ?? 0.0;
+            final centerY = detectionData[1]?.toDouble() ?? 0.0;
+            final width = detectionData[2]?.toDouble() ?? 0.0;
+            final height = detectionData[3]?.toDouble() ?? 0.0;
 
             final left = (centerX - width / 2) * originalWidth / inputSize;
             final top = (centerY - height / 2) * originalHeight / inputSize;
@@ -481,15 +581,36 @@ class StreamlinedRoomDetectionService {
             // Skip invalid detections
             if (detWidth <= 0 || detHeight <= 0) continue;
 
-            detections.add(Detection(
-              left: left,
-              top: top,
-              width: detWidth,
-              height: detHeight,
-              confidence: finalConfidence,
-              classId: 0, // Single class always has ID 0
-              label: 'room', // Always 'room' for single-class model
-            ));
+            Detection detection;
+
+            if (hasSegmentation && maskOutput != null) {
+              // Extract and process mask for this detection
+              final mask = _extractAndResizeMask(
+                  maskOutput, i, originalWidth.toInt(), originalHeight.toInt());
+
+              detection = SegmentationDetection(
+                left: left,
+                top: top,
+                width: detWidth,
+                height: detHeight,
+                confidence: finalConfidence,
+                classId: 0, // Single class always has ID 0
+                label: 'room', // Always 'room' for single-class model
+                mask: mask,
+              );
+            } else {
+              detection = Detection(
+                left: left,
+                top: top,
+                width: detWidth,
+                height: detHeight,
+                confidence: finalConfidence,
+                classId: 0, // Single class always has ID 0
+                label: 'room', // Always 'room' for single-class model
+              );
+            }
+
+            detections.add(detection);
           }
         }
       } catch (e) {
@@ -499,7 +620,7 @@ class StreamlinedRoomDetectionService {
     }
   }
 
-  /// Process YOLOv8 format detections
+  /// Process YOLOv8 format detections (with optional segmentation support)
   static void _processYOLOv8Format(
       dynamic output,
       int numFeatures,
@@ -508,7 +629,9 @@ class StreamlinedRoomDetectionService {
       double originalHeight,
       double weight,
       List<Detection> detections,
-      double confThreshold) {
+      double confThreshold,
+      [dynamic maskOutput,
+      bool hasSegmentation = false]) {
     for (int i = 0; i < numDetections; i++) {
       try {
         // Safely access output values with null checks
@@ -539,20 +662,40 @@ class StreamlinedRoomDetectionService {
           final left = (centerX - width / 2) * originalWidth / inputSize;
           final top = (centerY - height / 2) * originalHeight / inputSize;
           final detWidth = width * originalWidth / inputSize;
-          final detHeight = height * originalHeight / inputSize;
-
-          // Skip invalid detections
+          final detHeight =
+              height * originalHeight / inputSize; // Skip invalid detections
           if (detWidth <= 0 || detHeight <= 0) continue;
 
-          detections.add(Detection(
-            left: left,
-            top: top,
-            width: detWidth,
-            height: detHeight,
-            confidence: confidence,
-            classId: 0, // Single class always has ID 0
-            label: 'room', // Always 'room' for single-class model
-          ));
+          Detection detection;
+
+          if (hasSegmentation && maskOutput != null) {
+            // Extract and process mask for this detection
+            final mask = _extractAndResizeMask(
+                maskOutput, i, originalWidth.toInt(), originalHeight.toInt());
+
+            detection = SegmentationDetection(
+              left: left,
+              top: top,
+              width: detWidth,
+              height: detHeight,
+              confidence: confidence,
+              classId: 0, // Single class always has ID 0
+              label: 'room', // Always 'room' for single-class model
+              mask: mask,
+            );
+          } else {
+            detection = Detection(
+              left: left,
+              top: top,
+              width: detWidth,
+              height: detHeight,
+              confidence: confidence,
+              classId: 0, // Single class always has ID 0
+              label: 'room', // Always 'room' for single-class model
+            );
+          }
+
+          detections.add(detection);
         }
       } catch (e) {
         // Skip this detection and continue
@@ -561,30 +704,168 @@ class StreamlinedRoomDetectionService {
     }
   }
 
-  /// Create output buffer based on model output shape
-  dynamic _createOutputBuffer(List<int> shape) {
+  /// Create output buffers for both detection and segmentation models
+  List<dynamic> _createOutputBuffers(Interpreter interpreter) {
+    List<dynamic> outputs = [];
+
+    // For TensorFlow Lite, we only create a buffer for the main (first) output
+    // Additional outputs (like segmentation masks) are accessed via getOutputTensor
+    final outputTensor = interpreter.getOutputTensor(0);
+    final shape = outputTensor.shape;
+
     if (shape.length == 3) {
-      // YOLOv5 format: [batch, detections, features] or YOLOv8: [batch, features, detections]
-      return List.generate(shape[0],
-          (b) => List.generate(shape[1], (d) => List.filled(shape[2], 0.0)));
+      // Detection output: [batch, features, detections] or [batch, detections, features]
+      outputs.add(List.generate(shape[0],
+          (b) => List.generate(shape[1], (d) => List.filled(shape[2], 0.0))));
     } else if (shape.length == 2) {
       // 2D format: [features, detections]
-      return List.generate(shape[0], (f) => List.filled(shape[1], 0.0));
+      outputs.add(List.generate(shape[0], (f) => List.filled(shape[1], 0.0)));
     } else if (shape.length == 4) {
-      // 4D format: [batch, height, width, channels]
-      return List.generate(
+      // 4D format: [batch, height, width, channels] or segmentation masks
+      outputs.add(List.generate(
           shape[0],
           (b) => List.generate(
               shape[1],
               (h) =>
-                  List.generate(shape[2], (w) => List.filled(shape[3], 0.0))));
+                  List.generate(shape[2], (w) => List.filled(shape[3], 0.0)))));
     } else {
       throw Exception(
           'Unsupported output shape: $shape (${shape.length}D tensor)');
     }
+
+    return outputs;
   }
 
-  /// Average overlapping boxes
+  /// Extract and resize mask from segmentation output
+  static List<List<double>> _extractAndResizeMask(dynamic maskOutput,
+      int detectionIndex, int targetWidth, int targetHeight) {
+    try {
+      // maskOutput shape is typically [1, mask_dim, num_detections] or [1, mask_height, mask_width, num_detections]
+      // Extract the mask for this specific detection
+      List<List<double>> rawMask = [];
+
+      if (maskOutput is List && maskOutput.length > 0) {
+        final batch = maskOutput[0];
+
+        if (batch is List && batch.length > detectionIndex) {
+          // Handle different mask output formats
+          if (batch[0] is List) {
+            // 2D mask format: [mask_height, mask_width]
+            final maskData = batch[detectionIndex];
+            if (maskData is List) {
+              for (var row in maskData) {
+                if (row is List) {
+                  rawMask.add(row.map((e) => (e as num).toDouble()).toList());
+                }
+              }
+            }
+          } else {
+            // 1D mask format - need to reshape
+            final maskSize = (batch.length / detectionIndex).round();
+            final side = sqrt(maskSize).round();
+            final maskData = batch[detectionIndex];
+
+            if (maskData is List) {
+              for (int i = 0; i < side; i++) {
+                List<double> row = [];
+                for (int j = 0; j < side; j++) {
+                  final index = i * side + j;
+                  if (index < maskData.length) {
+                    row.add((maskData[index] as num).toDouble());
+                  }
+                }
+                if (row.isNotEmpty) rawMask.add(row);
+              }
+            }
+          }
+        }
+      }
+
+      // If we couldn't extract a mask, return a default empty mask
+      if (rawMask.isEmpty) {
+        return List.generate(
+            targetHeight, (_) => List.filled(targetWidth, 0.0));
+      }
+
+      // Normalize mask values to [0, 1] range
+      _normalizeMask(rawMask);
+
+      // Resize mask to target dimensions using bilinear interpolation
+      return _resizeMaskBilinear(rawMask, targetWidth, targetHeight);
+    } catch (e) {
+      print('Error extracting mask: $e');
+      // Return empty mask on error
+      return List.generate(targetHeight, (_) => List.filled(targetWidth, 0.0));
+    }
+  }
+
+  /// Normalize mask values to [0, 1] range
+  static void _normalizeMask(List<List<double>> mask) {
+    if (mask.isEmpty || mask[0].isEmpty) return;
+
+    double minVal = double.infinity;
+    double maxVal = double.negativeInfinity;
+
+    // Find min and max values
+    for (var row in mask) {
+      for (var val in row) {
+        if (val < minVal) minVal = val;
+        if (val > maxVal) maxVal = val;
+      }
+    }
+
+    // Normalize if range is valid
+    final range = maxVal - minVal;
+    if (range > 0) {
+      for (int i = 0; i < mask.length; i++) {
+        for (int j = 0; j < mask[i].length; j++) {
+          mask[i][j] = (mask[i][j] - minVal) / range;
+        }
+      }
+    }
+  }
+
+  /// Resize mask using bilinear interpolation
+  static List<List<double>> _resizeMaskBilinear(
+      List<List<double>> mask, int newWidth, int newHeight) {
+    if (mask.isEmpty || mask[0].isEmpty) {
+      return List.generate(newHeight, (_) => List.filled(newWidth, 0.0));
+    }
+
+    final oldHeight = mask.length;
+    final oldWidth = mask[0].length;
+
+    final resizedMask =
+        List.generate(newHeight, (_) => List.filled(newWidth, 0.0));
+
+    final scaleX = oldWidth / newWidth;
+    final scaleY = oldHeight / newHeight;
+
+    for (int y = 0; y < newHeight; y++) {
+      for (int x = 0; x < newWidth; x++) {
+        final srcX = x * scaleX;
+        final srcY = y * scaleY;
+
+        final x1 = srcX.floor();
+        final y1 = srcY.floor();
+        final x2 = (x1 + 1).clamp(0, oldWidth - 1);
+        final y2 = (y1 + 1).clamp(0, oldHeight - 1);
+
+        final fx = srcX - x1;
+        final fy = srcY - y1;
+
+        // Bilinear interpolation
+        final val1 = mask[y1][x1] * (1 - fx) + mask[y1][x2] * fx;
+        final val2 = mask[y2][x1] * (1 - fx) + mask[y2][x2] * fx;
+
+        resizedMask[y][x] = val1 * (1 - fy) + val2 * fy;
+      }
+    }
+
+    return resizedMask;
+  }
+
+  /// Average overlapping boxes (updated to handle SegmentationDetection)
   List<Detection> _averageOverlappingBoxes(List<Detection> detections) {
     if (detections.isEmpty) return detections;
 
@@ -623,15 +904,40 @@ class StreamlinedRoomDetectionService {
             group.map((d) => d.confidence).reduce((a, b) => a + b) /
                 group.length;
 
-        averaged.add(Detection(
-          left: avgLeft,
-          top: avgTop,
-          width: avgWidth,
-          height: avgHeight,
-          confidence: avgConfidence,
-          classId: group[0].classId,
-          label: group[0].label,
-        ));
+        // Check if this is a segmentation detection
+        if (group[0] is SegmentationDetection) {
+          // Average masks by taking the first non-empty mask
+          // (More sophisticated averaging could be implemented)
+          List<List<double>> avgMask = [];
+          for (var detection in group) {
+            if (detection is SegmentationDetection &&
+                detection.mask.isNotEmpty) {
+              avgMask = detection.mask;
+              break;
+            }
+          }
+
+          averaged.add(SegmentationDetection(
+            left: avgLeft,
+            top: avgTop,
+            width: avgWidth,
+            height: avgHeight,
+            confidence: avgConfidence,
+            classId: group[0].classId,
+            label: group[0].label,
+            mask: avgMask,
+          ));
+        } else {
+          averaged.add(Detection(
+            left: avgLeft,
+            top: avgTop,
+            width: avgWidth,
+            height: avgHeight,
+            confidence: avgConfidence,
+            classId: group[0].classId,
+            label: group[0].label,
+          ));
+        }
       }
     }
 

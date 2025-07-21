@@ -42,7 +42,7 @@ class _FloorPlanDetectionScreenState extends State<FloorPlanDetectionScreen> {
         ModelConfig(
             assetPath: 'assets/models/floorplan_v17.2.tflite', weight: 1.0),
         ModelConfig(
-            assetPath: 'assets/models/floorplan_v12.tflite', weight: 0.75),
+            assetPath: 'assets/models/floorplans-seg_v19.tflite', weight: 0.75),
       ],
       onLog: _addLog,
     );
