@@ -1,5 +1,4 @@
 import 'dart:io';
-import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:floorplan_detection_app/interfaces/detection.dart';
 import 'package:floorplan_detection_app/services/pdf_processing_service.dart';
@@ -7,19 +6,14 @@ import 'package:floorplan_detection_app/services/base_room_detection_service.dar
 import 'package:tflite_flutter/tflite_flutter.dart';
 import 'package:image/image.dart' as img;
 
-/// Streamlined room detection service without tiling
-/// Processes entire images resized to 640x640 for direct model inference
 class StreamlinedRoomDetectionService extends BaseRoomDetectionService {
   static const int inputSize = 640;
-  static const double confidenceThreshold =
-      0.1; // Lowered from 0.3 to catch more detections
+  static const double confidenceThreshold = 0.1;
   static const double iouGroupingThreshold = 0.5;
   static const double nmsThreshold = 0.45;
+  static const double minVarianceThreshold = 10.0; // Minimum pixel variance
 
-  // Model only accepts 'room' as a class
-  static const List<String> roomClassNames = [
-    'room', // Single class model
-  ];
+  static const List<String> roomClassNames = ['room'];
 
   final List<Interpreter> _interpreters = [];
   bool _isModelLoaded = false;
@@ -29,7 +23,6 @@ class StreamlinedRoomDetectionService extends BaseRoomDetectionService {
     super.onLog,
   });
 
-  /// Load all models asynchronously
   @override
   Future<bool> loadModels() async {
     try {
@@ -58,14 +51,12 @@ class StreamlinedRoomDetectionService extends BaseRoomDetectionService {
   @override
   bool get isModelLoaded => _isModelLoaded;
 
-  /// Process a PDF file by rendering it to a single 640x640 image
   @override
   Future<List<Detection>> processPDF(File pdfFile, {double dpi = 150.0}) async {
     try {
       logMessage('=== Starting PDF Processing ===');
       logMessage('Input PDF: ${pdfFile.path}');
 
-      // Step 1: Convert PDF to image
       logMessage('Converting PDF to image (DPI: $dpi)...');
       final image = await PdfProcessingService.pdfToImage(pdfFile, dpi: dpi);
       if (image == null) {
@@ -74,8 +65,6 @@ class StreamlinedRoomDetectionService extends BaseRoomDetectionService {
 
       logMessage(
           '✓ PDF converted to image: ${image.width}x${image.height} pixels');
-
-      // Step 2: Process the full image
       return await processFullImage(image);
     } catch (e) {
       logMessage('✗ Error processing PDF: $e');
@@ -83,14 +72,12 @@ class StreamlinedRoomDetectionService extends BaseRoomDetectionService {
     }
   }
 
-  /// Process a regular image file
   @override
   Future<List<Detection>> processImageFile(File imageFile) async {
     try {
       logMessage('=== Starting Image Processing ===');
       logMessage('Input image: ${imageFile.path}');
 
-      // Step 1: Load and decode image
       logMessage('Loading and decoding image...');
       final imageBytes = await imageFile.readAsBytes();
       logMessage('Image file size: ${imageBytes.length} bytes');
@@ -101,8 +88,6 @@ class StreamlinedRoomDetectionService extends BaseRoomDetectionService {
       }
 
       logMessage('✓ Image decoded: ${image.width}x${image.height} pixels');
-
-      // Step 2: Process the full image
       return await processFullImage(image);
     } catch (e) {
       logMessage('✗ Error processing image: $e');
@@ -110,13 +95,11 @@ class StreamlinedRoomDetectionService extends BaseRoomDetectionService {
     }
   }
 
-  /// Process a full image by resizing to 640x640 and running inference
   Future<List<Detection>> processFullImage(img.Image image) async {
     try {
       logMessage(
           'Processing full image: ${image.width}x${image.height} pixels');
 
-      // Step 1: Resize image to 640x640 (regardless of aspect ratio)
       logMessage('Resizing image to ${inputSize}x$inputSize pixels...');
       final resizedImage = await compute(_resizeImage, {
         'image': image,
@@ -126,21 +109,88 @@ class StreamlinedRoomDetectionService extends BaseRoomDetectionService {
       logMessage(
           '✓ Image resized to ${resizedImage.width}x${resizedImage.height}');
 
-      // Step 2: Run inference asynchronously
+      // Validate image content with a more comprehensive sample
+      final pixelSample = resizedImage.getPixel(0, 0);
+      logMessage(
+          'Sample pixel (0,0): R=${pixelSample.r}, G=${pixelSample.g}, B=${pixelSample.b}');
+
+      // Sample pixels from multiple regions to get a better representation
+      double pixelVariance = 0.0;
+      double pixelMean = 0.0;
+      int pixelCount = 0;
+
+      // Sample from 4 corners and center region (50x50 each)
+      final sampleSize = 50;
+      final regions = [
+        {'x': 0, 'y': 0}, // top-left
+        {'x': resizedImage.width - sampleSize, 'y': 0}, // top-right
+        {'x': 0, 'y': resizedImage.height - sampleSize}, // bottom-left
+        {
+          'x': resizedImage.width - sampleSize,
+          'y': resizedImage.height - sampleSize
+        }, // bottom-right
+        {
+          'x': (resizedImage.width - sampleSize) ~/ 2,
+          'y': (resizedImage.height - sampleSize) ~/ 2
+        }, // center
+      ];
+
+      // Calculate mean first
+      for (final region in regions) {
+        int startX = region['x']!.clamp(0, resizedImage.width - 1);
+        int startY = region['y']!.clamp(0, resizedImage.height - 1);
+        int endX = (startX + sampleSize).clamp(0, resizedImage.width);
+        int endY = (startY + sampleSize).clamp(0, resizedImage.height);
+
+        for (int y = startY; y < endY; y++) {
+          for (int x = startX; x < endX; x++) {
+            final pixel = resizedImage.getPixel(x, y);
+            pixelMean += pixel.r;
+            pixelCount++;
+          }
+        }
+      }
+      pixelMean /= pixelCount;
+
+      // Calculate variance
+      for (final region in regions) {
+        int startX = region['x']!.clamp(0, resizedImage.width - 1);
+        int startY = region['y']!.clamp(0, resizedImage.height - 1);
+        int endX = (startX + sampleSize).clamp(0, resizedImage.width);
+        int endY = (startY + sampleSize).clamp(0, resizedImage.height);
+
+        for (int y = startY; y < endY; y++) {
+          for (int x = startX; x < endX; x++) {
+            final pixel = resizedImage.getPixel(x, y);
+            pixelVariance += (pixel.r - pixelMean) * (pixel.r - pixelMean);
+          }
+        }
+      }
+      pixelVariance /= pixelCount;
+
+      logMessage(
+          'Pixel mean: ${pixelMean.toStringAsFixed(2)}, variance: ${pixelVariance.toStringAsFixed(2)} (sampled ${pixelCount} pixels from 5 regions)');
+      if (pixelVariance < minVarianceThreshold) {
+        logMessage(
+            '✗ Image rejected: Pixel variance (${pixelVariance.toStringAsFixed(2)}) below threshold ($minVarianceThreshold). Image appears too uniform.');
+        throw Exception(
+            'Image appears too uniform. Please ensure the image contains a floorplan with clear room boundaries and sufficient contrast.');
+      }
+
       logMessage('Starting model inference...');
       final detections = await _runInferenceAsync(resizedImage, image);
 
       logMessage(
           '✓ Inference completed: ${detections.length} detections found');
 
-      // Log detection results
       if (detections.isEmpty) {
         logMessage('⚠️ No rooms detected. This could be due to:');
         logMessage(
             '  - Model confidence threshold too low (current: $confidenceThreshold)');
         logMessage('  - Image doesn\'t contain recognizable room features');
-        logMessage('  - Model not suitable for this type of floorplan');
-        logMessage('  - Single-class model may need different preprocessing');
+        logMessage('  - Model not trained for this type of floorplan');
+        logMessage(
+            '  - Preprocessing mismatch (expected grayscale with adaptive thresholding)');
       } else {
         logMessage('=== Detection Results ===');
         for (int i = 0; i < detections.length; i++) {
@@ -157,7 +207,6 @@ class StreamlinedRoomDetectionService extends BaseRoomDetectionService {
     }
   }
 
-  /// Run model inference asynchronously to prevent UI blocking
   Future<List<Detection>> _runInferenceAsync(
       img.Image resizedImage, img.Image originalImage) async {
     try {
@@ -165,14 +214,33 @@ class StreamlinedRoomDetectionService extends BaseRoomDetectionService {
         throw Exception('Models not loaded');
       }
 
-      // Preprocess image in isolate to avoid blocking UI
       logMessage('Preprocessing image for model input...');
       final preprocessedData = await compute(_preprocessImage, resizedImage);
       logMessage('✓ Image preprocessing completed');
+      logMessage(
+          'Float32List length: ${preprocessedData['float32List'].length}');
+      logMessage(
+          'Input data sample (100 values): ${preprocessedData['float32List'].sublist(0, 100)}');
+      logMessage('Nested list shape: ${preprocessedData['nestedList'].length}x'
+          '${preprocessedData['nestedList'][0].length}x'
+          '${preprocessedData['nestedList'][0][0].length}x'
+          '${preprocessedData['nestedList'][0][0][0].length}');
+
+      // Validate input data - lower threshold and warning instead of exception
+      final inputData = preprocessedData['float32List'] as Float32List;
+      double inputMean = inputData.reduce((a, b) => a + b) / inputData.length;
+      double inputVariance = inputData.fold(
+              0.0, (sum, val) => sum + (val - inputMean) * (val - inputMean)) /
+          inputData.length;
+      logMessage(
+          'Input data mean: ${inputMean.toStringAsFixed(2)}, variance: ${inputVariance.toStringAsFixed(4)}');
+      if (inputVariance < 0.001) {
+        logMessage(
+            '⚠️ Warning: Input data variance (${inputVariance.toStringAsFixed(4)}) is very low. Image may be too uniform, but continuing with inference...');
+      }
 
       List<Detection> allDetections = [];
 
-      // Run inference on each model
       for (int i = 0; i < _interpreters.length; i++) {
         final interpreter = _interpreters[i];
         final weight = modelConfigs[i].weight;
@@ -181,151 +249,56 @@ class StreamlinedRoomDetectionService extends BaseRoomDetectionService {
             'Running inference on model ${i + 1}/${_interpreters.length}...');
 
         try {
-          // Get input and output tensor information
           final inputTensor = interpreter.getInputTensor(0);
           final outputTensors = interpreter.getOutputTensors();
 
-          logMessage('Model ${i + 1} input shape: ${inputTensor.shape}');
-          logMessage('Model ${i + 1} input type: ${inputTensor.type}');
           logMessage(
-              'Model ${i + 1} has ${outputTensors.length} output tensor(s)');
-
+              'Model ${i + 1} input shape: ${inputTensor.shape}, type: ${inputTensor.type}');
           for (int j = 0; j < outputTensors.length; j++) {
-            final tensor = outputTensors[j];
-            logMessage('Model ${i + 1} output $j shape: ${tensor.shape}');
-            logMessage('Model ${i + 1} output $j type: ${tensor.type}');
+            logMessage(
+                'Model ${i + 1} output $j shape: ${outputTensors[j].shape}, type: ${outputTensors[j].type}');
           }
 
-          // Try different input formats based on what the model expects
-          logMessage('Attempting inference with different input formats...');
-
-          // Create output buffer(s) - support both detection and segmentation models
           final outputs = _createOutputBuffers(interpreter);
           final hasSegmentation = outputTensors.length > 1;
 
-          // Run inference with error handling for different input formats
-          bool inferenceSuccess = false;
-          String errorMessage = '';
-
-          // Try Float32List format first (most efficient)
           try {
-            final inputData = preprocessedData['float32List'] as Float32List;
-            logMessage(
-                'Trying Float32List format (${inputData.length} elements)...');
-
-            // Always use the main output buffer for single output models
-            // For multi-output models, TF Lite should handle it automatically
-            interpreter.run(inputData, outputs[0]);
-
-            logMessage(
-                '✓ Model ${i + 1} inference completed with Float32List format');
-            inferenceSuccess = true;
-          } catch (e) {
-            errorMessage = 'Float32List: $e';
-            logMessage('Float32List format failed: $e');
-
-            // Try nested list format as fallback
-            try {
-              final inputData = preprocessedData['nestedList'];
-              logMessage('Trying nested list format...');
-
-              interpreter.run(inputData, outputs[0]);
-
-              logMessage(
-                  '✓ Model ${i + 1} inference completed with nested list format');
-              inferenceSuccess = true;
-            } catch (e2) {
-              errorMessage += ', Nested list: $e2';
-              logMessage('Nested list format also failed: $e2');
-
-              // Try with different tensor input approach
-              try {
-                final inputData =
-                    preprocessedData['float32List'] as Float32List;
-                logMessage('Trying alternative tensor input...');
-                // Reshape the data into proper tensor format
-                final reshapedInput = [inputData];
-
-                interpreter.run(reshapedInput, outputs[0]);
-
-                logMessage(
-                    '✓ Model ${i + 1} inference completed with reshaped tensor');
-                inferenceSuccess = true;
-              } catch (e3) {
-                errorMessage += ', Reshaped: $e3';
-                logMessage(
-                    'All input formats failed for model ${i + 1}: $errorMessage');
-                // Don't throw exception here, continue with next model
-              }
+            if (inputData.length != 1 * inputSize * inputSize * 3) {
+              throw Exception(
+                  'Invalid Float32List length: ${inputData.length}, expected ${1 * inputSize * inputSize * 3}');
             }
-          }
 
-          if (!inferenceSuccess) {
+            interpreter.allocateTensors();
+            logMessage('Tensors allocated successfully for model ${i + 1}');
+
+            // Reshape the input data to match the expected input tensor shape [1, 640, 640, 3]
+            final reshapedInput = preprocessedData['nestedList'];
+
+            final outputMap = <int, Object>{};
+            for (int j = 0; j < outputs.length; j++) {
+              outputMap[j] = outputs[j];
+            }
+            interpreter.runForMultipleInputs([reshapedInput], outputMap);
+
             logMessage(
-                '✗ Model ${i + 1} inference failed with all formats: $errorMessage');
-            continue; // Skip this model and try the next one
-          }
-
-          // Verify output is not null
-          if (outputs.isEmpty || outputs[0] == null) {
-            logMessage('✗ Model ${i + 1} produced null output');
+                '✓ Model ${i + 1} inference completed with nested list format');
+          } catch (e, stackTrace) {
+            logMessage('✗ Model ${i + 1} inference failed: $e');
+            logMessage(
+                'Stack trace: ${stackTrace.toString().split('\n').take(3).join('\n')}');
             continue;
           }
 
-          // Log segmentation capability
-          if (hasSegmentation) {
-            logMessage(
-                '✓ Model ${i + 1} supports segmentation (${outputTensors.length} outputs)');
-          }
-
-          // Get segmentation output if available
-          dynamic maskOutput = null;
+          dynamic maskOutput =
+              hasSegmentation && outputs.length > 1 ? outputs[1] : null;
           if (hasSegmentation && outputTensors.length > 1) {
-            // For multi-output models, we need to get the data from the second output tensor
-            final maskTensor = interpreter.getOutputTensor(1);
-            final maskShape = maskTensor.shape;
-            logMessage('Segmentation output shape: $maskShape');
-
-            // Create buffer for mask output
-            if (maskShape.length == 4) {
-              // 4D format: [batch, height, width, channels]
-              maskOutput = List.generate(
-                  maskShape[0],
-                  (b) => List.generate(
-                      maskShape[1],
-                      (h) => List.generate(maskShape[2],
-                          (w) => List.filled(maskShape[3], 0.0))));
-
-              // Copy data from tensor (this is a simplified approach)
-              // In practice, TensorFlow Lite may require different data access methods
-              try {
-                final maskData = maskTensor.data;
-                if (maskData is Float32List) {
-                  int index = 0;
-                  for (int b = 0; b < maskShape[0]; b++) {
-                    for (int h = 0; h < maskShape[1]; h++) {
-                      for (int w = 0; w < maskShape[2]; w++) {
-                        for (int c = 0; c < maskShape[3]; c++) {
-                          if (index < maskData.length) {
-                            maskOutput[b][h][w][c] = maskData[index++];
-                          }
-                        }
-                      }
-                    }
-                  }
-                }
-              } catch (e) {
-                logMessage('Warning: Could not extract segmentation data: $e');
-                maskOutput = null;
-              }
-            }
+            final maskTensor = outputTensors[1];
+            logMessage('Segmentation output shape: ${maskTensor.shape}');
           }
 
-          // Post-process detections in isolate
           final modelDetections = await compute(_postprocessDetections, {
-            'output': outputs[0], // Detection output
-            'maskOutput':
-                maskOutput, // Segmentation output (null if not available)
+            'output': outputs[0],
+            'maskOutput': maskOutput,
             'outputShape': outputTensors[0].shape,
             'originalWidth': originalImage.width.toDouble(),
             'originalHeight': originalImage.height.toDouble(),
@@ -341,17 +314,15 @@ class StreamlinedRoomDetectionService extends BaseRoomDetectionService {
           logMessage('✗ Model ${i + 1} inference failed: $e');
           logMessage(
               'Stack trace: ${stackTrace.toString().split('\n').take(3).join('\n')}');
-          // Continue with other models
         }
       }
 
-      // Apply NMS and final processing
       logMessage('Applying non-maximum suppression...');
       logMessage('Total raw detections before NMS: ${allDetections.length}');
 
       if (allDetections.isEmpty) {
         logMessage('⚠️ No detections found from any model');
-        return <Detection>[]; // Return empty list instead of throwing
+        return <Detection>[];
       }
 
       final averagedDetections = _averageOverlappingBoxes(allDetections);
@@ -364,13 +335,11 @@ class StreamlinedRoomDetectionService extends BaseRoomDetectionService {
     } catch (e, stackTrace) {
       logMessage('✗ Inference failed: $e');
       logMessage(
-          'Full stack trace: ${stackTrace.toString().split('\n').take(5).join('\n')}');
-      // Return empty list instead of crashing the app
+          'Stack trace: ${stackTrace.toString().split('\n').take(5).join('\n')}');
       return <Detection>[];
     }
   }
 
-  /// Dispose resources
   @override
   void dispose() {
     logMessage('Disposing detection service resources...');
@@ -381,62 +350,95 @@ class StreamlinedRoomDetectionService extends BaseRoomDetectionService {
     _isModelLoaded = false;
   }
 
-  // Static methods for isolate processing
-
-  /// Decode image in isolate
   static img.Image? _decodeImage(Uint8List imageBytes) {
     return img.decodeImage(imageBytes);
   }
 
-  /// Resize image in isolate
   static img.Image _resizeImage(Map<String, dynamic> params) {
     final image = params['image'] as img.Image;
     final size = params['size'] as int;
     return img.copyResize(image, width: size, height: size);
   }
 
-  /// Preprocess image for model input in isolate
   static dynamic _preprocessImage(img.Image image) {
     try {
       print('Preprocessing image: ${image.width}x${image.height}');
 
-      // Ensure we have a valid 640x640 image
       if (image.width != inputSize || image.height != inputSize) {
         throw Exception(
             'Image must be ${inputSize}x$inputSize, got ${image.width}x${image.height}');
       }
 
-      // Create different input formats for TensorFlow Lite compatibility
+      // Convert to grayscale
+      final grayscaleImage = img.grayscale(image);
+
+      // Try adaptive thresholding first
+      img.Image processedImage;
+      try {
+        final thresholdedImage = _adaptiveThreshold(grayscaleImage);
+
+        // Check if adaptive thresholding made the image too uniform
+        final sampleVariance = _calculateImageVariance(thresholdedImage);
+        if (sampleVariance > 0.1) {
+          // Adaptive thresholding worked well
+          processedImage = img.adjustColor(thresholdedImage, contrast: 1.5);
+          print(
+              'Using adaptive thresholded image (variance: ${sampleVariance.toStringAsFixed(4)})');
+        } else {
+          // Fallback: use enhanced grayscale without thresholding
+          processedImage =
+              img.adjustColor(grayscaleImage, contrast: 2.0, brightness: 0.1);
+          print(
+              'Fallback: using enhanced grayscale (adaptive threshold variance too low: ${sampleVariance.toStringAsFixed(4)})');
+        }
+      } catch (e) {
+        // Fallback: use enhanced grayscale without thresholding
+        processedImage =
+            img.adjustColor(grayscaleImage, contrast: 2.0, brightness: 0.1);
+        print(
+            'Fallback: using enhanced grayscale due to adaptive threshold error: $e');
+      }
+
       final inputBytes = Float32List(1 * inputSize * inputSize * 3);
       int pixelIndex = 0;
 
-      // Convert image to NHWC format (batch, height, width, channels)
       for (int y = 0; y < inputSize; y++) {
         for (int x = 0; x < inputSize; x++) {
-          final pixel = image.getPixel(x, y);
-
-          // Normalize pixel values to [0, 1] range
-          final r = pixel.r / 255.0;
-          final g = pixel.g / 255.0;
-          final b = pixel.b / 255.0;
-
-          inputBytes[pixelIndex++] = r;
-          inputBytes[pixelIndex++] = g;
-          inputBytes[pixelIndex++] = b;
+          final pixel = processedImage.getPixel(x, y);
+          final value = pixel.r / 255.0; // Grayscale: R=G=B
+          inputBytes[pixelIndex++] = value;
+          inputBytes[pixelIndex++] = value;
+          inputBytes[pixelIndex++] = value;
         }
       }
 
       print('Generated Float32List with ${inputBytes.length} elements');
+      print('Input data sample (100 values): ${inputBytes.sublist(0, 100)}');
 
-      // Create nested list format (4D: [batch, height, width, channels])
+      // Validate input data - use a lower threshold for preprocessed data
+      double inputMean = inputBytes.reduce((a, b) => a + b) / inputBytes.length;
+      double inputVariance = inputBytes.fold(
+              0.0, (sum, val) => sum + (val - inputMean) * (val - inputMean)) /
+          inputBytes.length;
+      print(
+          'Input data mean: ${inputMean.toStringAsFixed(2)}, variance: ${inputVariance.toStringAsFixed(2)}');
+      if (inputVariance < 0.001) {
+        // Lower threshold for preprocessed data
+        print(
+            '✗ Preprocessed image has very low variance (${inputVariance.toStringAsFixed(4)}). Image may lack sufficient contrast after preprocessing.');
+        // Don't throw exception here, let the model try to process it
+        print(
+            '⚠️ Warning: Low variance detected, but continuing with inference...');
+      }
+
       final nestedList = List.generate(1, (batch) {
         return List.generate(inputSize, (h) {
           return List.generate(inputSize, (w) {
             final baseIndex = (h * inputSize + w) * 3;
             return [
-              inputBytes[baseIndex], // R
-              inputBytes[baseIndex + 1], // G
-              inputBytes[baseIndex + 2], // B
+              inputBytes[baseIndex],
+              inputBytes[baseIndex + 1],
+              inputBytes[baseIndex + 2],
             ];
           });
         });
@@ -455,11 +457,37 @@ class StreamlinedRoomDetectionService extends BaseRoomDetectionService {
     }
   }
 
-  /// Post-process detections in isolate (supports both detection and segmentation)
+  static img.Image _adaptiveThreshold(img.Image image) {
+    // Implement adaptive thresholding to enhance contrast
+    final thresholded = img.Image.from(image);
+    final windowSize = 15; // Adjust based on image characteristics
+    final c = 7; // Constant subtracted from mean
+
+    for (int y = 0; y < image.height; y++) {
+      for (int x = 0; x < image.width; x++) {
+        // Compute local mean in a window
+        double sum = 0.0;
+        int count = 0;
+        for (int dy = -windowSize ~/ 2; dy <= windowSize ~/ 2; dy++) {
+          for (int dx = -windowSize ~/ 2; dx <= windowSize ~/ 2; dx++) {
+            int ny = (y + dy).clamp(0, image.height - 1);
+            int nx = (x + dx).clamp(0, image.width - 1);
+            sum += image.getPixel(nx, ny).r;
+            count++;
+          }
+        }
+        final localMean = sum / count;
+        final pixel = image.getPixel(x, y).r;
+        thresholded.setPixel(
+            x, y, (pixel > localMean - c ? 255 : 0) as img.Color);
+      }
+    }
+    return thresholded;
+  }
+
   static List<Detection> _postprocessDetections(Map<String, dynamic> params) {
     final output = params['output'];
-    final maskOutput =
-        params['maskOutput']; // Can be null for detection-only models
+    final maskOutput = params['maskOutput'];
     final outputShape = params['outputShape'] as List<int>;
     final originalWidth = params['originalWidth'] as double;
     final originalHeight = params['originalHeight'] as double;
@@ -474,14 +502,12 @@ class StreamlinedRoomDetectionService extends BaseRoomDetectionService {
       print('Has segmentation: $hasSegmentation');
 
       if (outputShape.length == 3) {
-        // Handle both YOLOv5 [1, num_detections, num_features] and YOLOv8 transposed [1, num_features, num_detections]
-        final dim1 = outputShape[1]; // Could be detections or features
-        final dim2 = outputShape[2]; // Could be features or detections
+        final dim1 = outputShape[1];
+        final dim2 = outputShape[2];
 
         print('Postprocessing: dim1=$dim1, dim2=$dim2');
 
         if (dim1 > dim2) {
-          // YOLOv5 format: [1, 25200, 85] - more detections than features
           print('Processing as YOLOv5 format');
           _processYOLOv5Format(
               output,
@@ -495,7 +521,6 @@ class StreamlinedRoomDetectionService extends BaseRoomDetectionService {
               maskOutput,
               hasSegmentation);
         } else {
-          // YOLOv8 format: [1, 37, 8400] - more detections than features (transposed)
           print('Processing as YOLOv8 format (single-class room model)');
           _processYOLOv8Format(
               output,
@@ -510,7 +535,6 @@ class StreamlinedRoomDetectionService extends BaseRoomDetectionService {
               hasSegmentation);
         }
       } else if (outputShape.length == 2) {
-        // Direct 2D format: [num_features, num_detections]
         final numFeatures = outputShape[0];
         final numDetections = outputShape[1];
         print('Processing as 2D YOLOv8 format');
@@ -532,13 +556,11 @@ class StreamlinedRoomDetectionService extends BaseRoomDetectionService {
       print('Postprocessing complete: Found ${detections.length} detections');
     } catch (e) {
       print('Error in postprocessing: $e');
-      // Return empty list instead of crashing
     }
 
     return detections;
   }
 
-  /// Process YOLOv5 format detections (with optional segmentation support)
   static void _processYOLOv5Format(
       dynamic output,
       int numDetections,
@@ -552,25 +574,20 @@ class StreamlinedRoomDetectionService extends BaseRoomDetectionService {
       bool hasSegmentation = false]) {
     for (int i = 0; i < numDetections; i++) {
       try {
-        // Safely access output values with null checks
         final detectionData = output[0]?[i];
         if (detectionData == null || detectionData.length < 5) continue;
 
         final objectness = detectionData[4]?.toDouble() ?? 0.0;
 
         if (objectness * weight > confThreshold) {
-          // For single-class model, use objectness as confidence or check if there's a class score
           double finalConfidence = objectness * weight;
 
-          // If there are class scores beyond index 5, use the first (and likely only) class
           if (numFeatures > 5 && detectionData.length > 5) {
-            final classScore = detectionData[5]?.toDouble() ??
-                1.0; // Default to 1.0 for single class
+            final classScore = detectionData[5]?.toDouble() ?? 1.0;
             finalConfidence = objectness * classScore * weight;
           }
 
           if (finalConfidence > confThreshold) {
-            // Convert from center format to corner format
             final centerX = detectionData[0]?.toDouble() ?? 0.0;
             final centerY = detectionData[1]?.toDouble() ?? 0.0;
             final width = detectionData[2]?.toDouble() ?? 0.0;
@@ -581,24 +598,21 @@ class StreamlinedRoomDetectionService extends BaseRoomDetectionService {
             final detWidth = width * originalWidth / inputSize;
             final detHeight = height * originalHeight / inputSize;
 
-            // Skip invalid detections
             if (detWidth <= 0 || detHeight <= 0) continue;
 
             Detection detection;
 
             if (hasSegmentation && maskOutput != null) {
-              // Extract and process mask for this detection
               final mask = _extractAndResizeMask(
                   maskOutput, i, originalWidth.toInt(), originalHeight.toInt());
-
               detection = SegmentationDetection(
                 left: left,
                 top: top,
                 width: detWidth,
                 height: detHeight,
                 confidence: finalConfidence,
-                classId: 0, // Single class always has ID 0
-                label: 'room', // Always 'room' for single-class model
+                classId: 0,
+                label: 'room',
                 mask: mask,
               );
             } else {
@@ -608,8 +622,8 @@ class StreamlinedRoomDetectionService extends BaseRoomDetectionService {
                 width: detWidth,
                 height: detHeight,
                 confidence: finalConfidence,
-                classId: 0, // Single class always has ID 0
-                label: 'room', // Always 'room' for single-class model
+                classId: 0,
+                label: 'room',
               );
             }
 
@@ -617,13 +631,11 @@ class StreamlinedRoomDetectionService extends BaseRoomDetectionService {
           }
         }
       } catch (e) {
-        // Skip this detection and continue
         continue;
       }
     }
   }
 
-  /// Process YOLOv8 format detections (with optional segmentation support)
   static void _processYOLOv8Format(
       dynamic output,
       int numFeatures,
@@ -637,26 +649,21 @@ class StreamlinedRoomDetectionService extends BaseRoomDetectionService {
       bool hasSegmentation = false]) {
     for (int i = 0; i < numDetections; i++) {
       try {
-        // Safely access output values with null checks
         final batch = output[0];
         if (batch == null) continue;
 
-        // For single-class model, the class score is at feature index 4
         double confidence = 0.0;
 
         if (numFeatures > 4) {
-          // Extract the single class score (feature 4)
           final featureArray = batch[4];
           if (featureArray != null && i < featureArray.length) {
             confidence = (featureArray[i]?.toDouble() ?? 0.0) * weight;
           }
         } else {
-          // If no class scores, use a default high confidence for detected objects
           confidence = 0.8 * weight;
         }
 
         if (confidence > confThreshold) {
-          // Extract bounding box coordinates
           final centerX = batch[0]?[i]?.toDouble() ?? 0.0;
           final centerY = batch[1]?[i]?.toDouble() ?? 0.0;
           final width = batch[2]?[i]?.toDouble() ?? 0.0;
@@ -665,25 +672,23 @@ class StreamlinedRoomDetectionService extends BaseRoomDetectionService {
           final left = (centerX - width / 2) * originalWidth / inputSize;
           final top = (centerY - height / 2) * originalHeight / inputSize;
           final detWidth = width * originalWidth / inputSize;
-          final detHeight =
-              height * originalHeight / inputSize; // Skip invalid detections
+          final detHeight = height * originalHeight / inputSize;
+
           if (detWidth <= 0 || detHeight <= 0) continue;
 
           Detection detection;
 
           if (hasSegmentation && maskOutput != null) {
-            // Extract and process mask for this detection
             final mask = _extractAndResizeMask(
                 maskOutput, i, originalWidth.toInt(), originalHeight.toInt());
-
             detection = SegmentationDetection(
               left: left,
               top: top,
               width: detWidth,
               height: detHeight,
               confidence: confidence,
-              classId: 0, // Single class always has ID 0
-              label: 'room', // Always 'room' for single-class model
+              classId: 0,
+              label: 'room',
               mask: mask,
             );
           } else {
@@ -693,123 +698,88 @@ class StreamlinedRoomDetectionService extends BaseRoomDetectionService {
               width: detWidth,
               height: detHeight,
               confidence: confidence,
-              classId: 0, // Single class always has ID 0
-              label: 'room', // Always 'room' for single-class model
+              classId: 0,
+              label: 'room',
             );
           }
 
           detections.add(detection);
         }
       } catch (e) {
-        // Skip this detection and continue
         continue;
       }
     }
   }
 
-  /// Create output buffers for both detection and segmentation models
   List<dynamic> _createOutputBuffers(Interpreter interpreter) {
     List<dynamic> outputs = [];
+    final outputTensors = interpreter.getOutputTensors();
 
-    // For TensorFlow Lite, we only create a buffer for the main (first) output
-    // Additional outputs (like segmentation masks) are accessed via getOutputTensor
-    final outputTensor = interpreter.getOutputTensor(0);
-    final shape = outputTensor.shape;
+    for (int i = 0; i < outputTensors.length; i++) {
+      final outputTensor = outputTensors[i];
+      final shape = outputTensor.shape;
 
-    if (shape.length == 3) {
-      // Detection output: [batch, features, detections] or [batch, detections, features]
-      outputs.add(List.generate(shape[0],
-          (b) => List.generate(shape[1], (d) => List.filled(shape[2], 0.0))));
-    } else if (shape.length == 2) {
-      // 2D format: [features, detections]
-      outputs.add(List.generate(shape[0], (f) => List.filled(shape[1], 0.0)));
-    } else if (shape.length == 4) {
-      // 4D format: [batch, height, width, channels] or segmentation masks
-      outputs.add(List.generate(
-          shape[0],
-          (b) => List.generate(
-              shape[1],
-              (h) =>
-                  List.generate(shape[2], (w) => List.filled(shape[3], 0.0)))));
-    } else {
-      throw Exception(
-          'Unsupported output shape: $shape (${shape.length}D tensor)');
+      logMessage(
+          'Creating buffer for output $i with shape: $shape, type: ${outputTensor.type}');
+
+      if (shape.length == 3) {
+        outputs.add(List.generate(shape[0],
+            (b) => List.generate(shape[1], (d) => List.filled(shape[2], 0.0))));
+      } else if (shape.length == 4) {
+        outputs.add(List.generate(
+            shape[0],
+            (b) => List.generate(
+                shape[1],
+                (h) => List.generate(
+                    shape[2], (w) => List.filled(shape[3], 0.0)))));
+      } else {
+        throw Exception('Unsupported output shape: $shape for output $i');
+      }
     }
 
+    logMessage('Created ${outputs.length} output buffers');
     return outputs;
   }
 
-  /// Extract and resize mask from segmentation output
   static List<List<double>> _extractAndResizeMask(dynamic maskOutput,
       int detectionIndex, int targetWidth, int targetHeight) {
     try {
-      // maskOutput shape is typically [1, mask_dim, num_detections] or [1, mask_height, mask_width, num_detections]
-      // Extract the mask for this specific detection
       List<List<double>> rawMask = [];
 
       if (maskOutput is List && maskOutput.length > 0) {
         final batch = maskOutput[0];
 
         if (batch is List && batch.length > detectionIndex) {
-          // Handle different mask output formats
-          if (batch[0] is List) {
-            // 2D mask format: [mask_height, mask_width]
-            final maskData = batch[detectionIndex];
-            if (maskData is List) {
-              for (var row in maskData) {
-                if (row is List) {
-                  rawMask.add(row.map((e) => (e as num).toDouble()).toList());
-                }
-              }
-            }
-          } else {
-            // 1D mask format - need to reshape
-            final maskSize = (batch.length / detectionIndex).round();
-            final side = sqrt(maskSize).round();
-            final maskData = batch[detectionIndex];
-
-            if (maskData is List) {
-              for (int i = 0; i < side; i++) {
-                List<double> row = [];
-                for (int j = 0; j < side; j++) {
-                  final index = i * side + j;
-                  if (index < maskData.length) {
-                    row.add((maskData[index] as num).toDouble());
-                  }
-                }
-                if (row.isNotEmpty) rawMask.add(row);
+          final maskData = batch[detectionIndex];
+          if (maskData is List) {
+            for (var row in maskData) {
+              if (row is List) {
+                rawMask.add(row.map((e) => (e as num).toDouble()).toList());
               }
             }
           }
         }
       }
 
-      // If we couldn't extract a mask, return a default empty mask
       if (rawMask.isEmpty) {
         return List.generate(
             targetHeight, (_) => List.filled(targetWidth, 0.0));
       }
 
-      // Normalize mask values to [0, 1] range
       _normalizeMask(rawMask);
-
-      // Resize mask to target dimensions using bilinear interpolation
       return _resizeMaskBilinear(rawMask, targetWidth, targetHeight);
     } catch (e) {
       print('Error extracting mask: $e');
-      // Return empty mask on error
       return List.generate(targetHeight, (_) => List.filled(targetWidth, 0.0));
     }
   }
 
-  /// Normalize mask values to [0, 1] range
   static void _normalizeMask(List<List<double>> mask) {
     if (mask.isEmpty || mask[0].isEmpty) return;
 
     double minVal = double.infinity;
     double maxVal = double.negativeInfinity;
 
-    // Find min and max values
     for (var row in mask) {
       for (var val in row) {
         if (val < minVal) minVal = val;
@@ -817,7 +787,6 @@ class StreamlinedRoomDetectionService extends BaseRoomDetectionService {
       }
     }
 
-    // Normalize if range is valid
     final range = maxVal - minVal;
     if (range > 0) {
       for (int i = 0; i < mask.length; i++) {
@@ -828,7 +797,6 @@ class StreamlinedRoomDetectionService extends BaseRoomDetectionService {
     }
   }
 
-  /// Resize mask using bilinear interpolation
   static List<List<double>> _resizeMaskBilinear(
       List<List<double>> mask, int newWidth, int newHeight) {
     if (mask.isEmpty || mask[0].isEmpty) {
@@ -857,7 +825,6 @@ class StreamlinedRoomDetectionService extends BaseRoomDetectionService {
         final fx = srcX - x1;
         final fy = srcY - y1;
 
-        // Bilinear interpolation
         final val1 = mask[y1][x1] * (1 - fx) + mask[y1][x2] * fx;
         final val2 = mask[y2][x1] * (1 - fx) + mask[y2][x2] * fx;
 
@@ -868,7 +835,6 @@ class StreamlinedRoomDetectionService extends BaseRoomDetectionService {
     return resizedMask;
   }
 
-  /// Average overlapping boxes (updated to handle SegmentationDetection)
   List<Detection> _averageOverlappingBoxes(List<Detection> detections) {
     if (detections.isEmpty) return detections;
 
@@ -891,7 +857,6 @@ class StreamlinedRoomDetectionService extends BaseRoomDetectionService {
         }
       }
 
-      // Average the group
       if (group.length == 1) {
         averaged.add(group[0]);
       } else {
@@ -907,10 +872,7 @@ class StreamlinedRoomDetectionService extends BaseRoomDetectionService {
             group.map((d) => d.confidence).reduce((a, b) => a + b) /
                 group.length;
 
-        // Check if this is a segmentation detection
         if (group[0] is SegmentationDetection) {
-          // Average masks by taking the first non-empty mask
-          // (More sophisticated averaging could be implemented)
           List<List<double>> avgMask = [];
           for (var detection in group) {
             if (detection is SegmentationDetection &&
@@ -947,11 +909,9 @@ class StreamlinedRoomDetectionService extends BaseRoomDetectionService {
     return averaged;
   }
 
-  /// Apply Non-Maximum Suppression
   List<Detection> _applyNMS(List<Detection> detections) {
     if (detections.isEmpty) return detections;
 
-    // Sort by confidence
     detections.sort((a, b) => b.confidence.compareTo(a.confidence));
 
     List<Detection> kept = [];
@@ -975,7 +935,6 @@ class StreamlinedRoomDetectionService extends BaseRoomDetectionService {
     return kept;
   }
 
-  /// Calculate Intersection over Union
   double _calculateIoU(Detection a, Detection b) {
     final left = [a.left, b.left].reduce((a, b) => a > b ? a : b);
     final top = [a.top, b.top].reduce((a, b) => a > b ? a : b);
@@ -992,5 +951,59 @@ class StreamlinedRoomDetectionService extends BaseRoomDetectionService {
     final union = areaA + areaB - intersection;
 
     return intersection / union;
+  }
+
+  // Helper method to calculate image variance for preprocessing validation
+  static double _calculateImageVariance(img.Image image) {
+    double mean = 0.0;
+    int pixelCount = 0;
+
+    // Sample from multiple regions to get variance
+    final sampleSize = 20;
+    final regions = [
+      {'x': 0, 'y': 0},
+      {'x': image.width - sampleSize, 'y': 0},
+      {'x': 0, 'y': image.height - sampleSize},
+      {'x': image.width - sampleSize, 'y': image.height - sampleSize},
+      {
+        'x': (image.width - sampleSize) ~/ 2,
+        'y': (image.height - sampleSize) ~/ 2
+      },
+    ];
+
+    // Calculate mean
+    for (final region in regions) {
+      int startX = region['x']!.clamp(0, image.width - 1);
+      int startY = region['y']!.clamp(0, image.height - 1);
+      int endX = (startX + sampleSize).clamp(0, image.width);
+      int endY = (startY + sampleSize).clamp(0, image.height);
+
+      for (int y = startY; y < endY; y++) {
+        for (int x = startX; x < endX; x++) {
+          mean += image.getPixel(x, y).r;
+          pixelCount++;
+        }
+      }
+    }
+    mean /= pixelCount;
+
+    // Calculate variance
+    double variance = 0.0;
+    for (final region in regions) {
+      int startX = region['x']!.clamp(0, image.width - 1);
+      int startY = region['y']!.clamp(0, image.height - 1);
+      int endX = (startX + sampleSize).clamp(0, image.width);
+      int endY = (startY + sampleSize).clamp(0, image.height);
+
+      for (int y = startY; y < endY; y++) {
+        for (int x = startX; x < endX; x++) {
+          final pixelValue = image.getPixel(x, y).r;
+          variance += (pixelValue - mean) * (pixelValue - mean);
+        }
+      }
+    }
+    variance /= pixelCount;
+
+    return variance / (255.0 * 255.0); // Normalize to 0-1 range
   }
 }

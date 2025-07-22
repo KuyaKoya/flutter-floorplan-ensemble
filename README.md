@@ -1,226 +1,566 @@
 # Floor Plan Room Detection App
 
-A Flutter application that uses on-device YOLO (You Only Look Once) machine learning to detect rooms in floor plan images using TensorFlow Lite. Now supports PDF import and large image tiling for processing architectural drawings.
+A Flutter application that uses on-device YOLO machine learning to detect and segment rooms in floor plan images using TensorFlow Lite. Features advanced multi-model ensemble detection with PDF processing and intelligent image tiling for architectural drawings.
 
-## Features
+## ✨ Features
 
-- **On-device AI inference** using TensorFlow Lite (no internet required)
-- **YOLO room detection** for architectural floor plans
-- **PDF import and conversion** to raster images for processing
-- **Large image tiling** with overlap handling for processing big floor plans
-- **Multi-model ensemble** support with weighted confidence averaging
-- **Advanced post-processing** with box averaging and NMS across tiles
-- **Image input** from camera, gallery, PDF files, or sample assets
-- **Real-time visualization** of detected rooms with bounding boxes
-- **Cross-platform** support (iOS, Android, Web, Desktop)
+- **🤖 On-device AI inference** using TensorFlow Lite (no internet required)
+- **🏠 Advanced room detection** with multiple YOLO models and segmentation
+- **📄 PDF import and processing** with automatic conversion to images
+- **🧩 Intelligent image tiling** with overlap handling for large floor plans
+- **🎯 Multi-model ensemble** support with weighted confidence averaging
+- **⚡ Dual processing modes** - Streamlined for small images, Tiled for large ones
+- **📱 Multiple input sources** - Camera, gallery, PDF files, or sample assets
+- **🎨 Real-time visualization** with bounding boxes and confidence scores
+- **🌐 Cross-platform support** (iOS, Android, Web, Desktop)
+- **📊 Live processing logs** with detailed operation tracking
 
-## Technology Stack
-
-- **Flutter** - Cross-platform UI framework
-- **TensorFlow Lite** - On-device machine learning inference
-- **YOLO** - Object detection model architecture
-- **Image processing** - Built-in Dart image manipulation
-- **PDF processing** - PDF to image conversion
-- **File picking** - Platform-native file selection
-
-## New Architecture Overview
+## 🏗️ Architecture Overview
 
 ### Core Services
 
-1. **`RoomDetectionService`** - Base YOLO inference with multi-model support
-2. **`PdfProcessingService`** - PDF import and image tiling utilities
-3. **`TiledRoomDetectionService`** - Enhanced detection with tiling pipeline
-4. **`FloorplanProcessingDemo`** - Complete workflow demonstrations
+The app uses a factory pattern with multiple specialized detection services:
+
+1. **`StreamlinedRoomDetectionService`** - Direct model inference for small-to-medium images
+2. **`TiledRoomDetectionService`** - Advanced tiling pipeline for large images  
+3. **`PdfProcessingService`** - PDF to image conversion and preprocessing
+4. **`BaseRoomDetectionService`** - Abstract interface for all detection services
+
+### Available Models
+
+The app includes three pre-trained models in `assets/models/`:
+
+- **`floorplan_v17.2.tflite`** - Primary detection model (weight: 1.0)
+- **`floorplans-seg_v19.tflite`** - Segmentation model (weight: 0.75)  
+- **`floorplan_v12.tflite`** - Alternative detection model
 
 ### Processing Pipeline
 
+**Streamlined Mode (Small Images):**
+
+```text
+Image Input → Resize to 640×640 → Multi-Model Inference → 
+Ensemble Averaging → NMS → Coordinate Scaling → Results
 ```
-PDF File → PDF to Image → Create Tiles → Process Each Tile → 
+
+**Tiled Mode (Large Images):**
+
+```text
+Large Image → Create Overlapping Tiles → Process Each Tile → 
 Transform Coordinates → Global Post-processing → Final Detections
 ```
 
-### Key Improvements
+### Key Capabilities
 
-- **Tiling System**: Splits large images into 640×640 overlapping tiles
-- **Coordinate Transformation**: Maps tile-local detections to global coordinates
-- **Overlap Handling**: Prevents double-counting in overlapping regions
-- **Ensemble Detection**: Combines multiple models with weighted confidence
-- **Advanced NMS**: Global non-maximum suppression across all tiles
+- **🔄 Automatic service selection** based on image size
+- **🎛️ Manual service switching** via UI toggle
+- **📝 Comprehensive logging** with real-time status updates
+- **⚖️ Weighted model ensemble** for improved accuracy
+- **🎯 Advanced NMS** to eliminate duplicate detections
+- **📐 Precise coordinate transformation** from tile-space to image-space
 
-## Setup Instructions
+## 🛠️ Technology Stack
 
-### 1. Prerequisites
+- **Flutter 3.6.1+** - Cross-platform UI framework with Material 3 design
+- **TensorFlow Lite 0.11.0** - On-device machine learning inference
+- **YOLO Architecture** - Object detection and segmentation models
+- **Dart Image 4.1.7** - Advanced image processing and manipulation
+- **PDF Processing** - Built-in PDF to image conversion (pdf: 3.10.7)
+- **File System Access** - Camera, gallery, and PDF file picking
+- **Printing 5.12.0** - PDF generation and export capabilities
 
-- Flutter SDK (3.6.1 or later)
-- Dart SDK
-- Android Studio / Xcode for mobile development
-- A trained YOLOv5 TensorFlow Lite model for room detection
+## 🚀 Getting Started
 
-### 2. Install Dependencies
+### Prerequisites
 
-```bash
-flutter pub get
-```
+- **Flutter SDK 3.6.1+**
+- **Dart SDK** (included with Flutter)
+- **Android Studio** or **Xcode** for mobile development
+- **VS Code** with Flutter extensions (recommended)
 
-### 3. Add YOLO Model
+### Installation
 
-Place your trained YOLOv5 TensorFlow Lite model in the assets folder:
+1. **Clone the repository:**
 
-```
-assets/models/yolov5.tflite
-```
+   ```bash
+   git clone <repository-url>
+   cd floorplan_detection_app
+   ```
 
-**Model Requirements:**
+2. **Install dependencies:**
 
-- Input size: 640x640 pixels
-- Output format: [x, y, w, h, confidence, class_id]
-- Class index for "room": 0
-- TensorFlow Lite format (.tflite)
+   ```bash
+   flutter pub get
+   ```
 
-### 4. Add Sample Images (Optional)
+3. **Verify models are present:**
 
-Add test floor plan images to:
+   ```bash
+   ls assets/models/
+   # Should show: floorplan_v12.tflite, floorplan_v17.2.tflite, floorplans-seg_v19.tflite
+   ```
 
-```
-assets/images/sample_floorplan.png
-```
+4. **Run the app:**
 
-### 5. Model Conversion (If needed)
+   ```bash
+   flutter run
+   # Or use the VS Code task: "Flutter: Run Debug"
+   ```
 
-If you have a PyTorch YOLOv5 model, convert it to TensorFlow Lite:
+## 📱 How to Use
 
-```bash
-pip install ultralytics
-yolo export model=yolov5s.pt format=tflite imgsz=640
-```
+### Basic Workflow
 
-## Usage
+1. **🚀 Launch the app** and wait for model initialization
+2. **📊 Monitor the status** - Models will load automatically (shows progress)
+3. **⚙️ Choose processing mode:**
+   - **Streamlined**: Best for small-medium images (faster)
+   - **Tiled**: Best for large architectural drawings (more accurate)
+4. **📸 Select input source:**
+   - **📷 Camera**: Take a photo of a floor plan
+   - **🖼️ Gallery**: Choose from existing images
+   - **📄 PDF**: Import and process PDF floor plans
+   - **📋 Sample**: Use bundled test images
+5. **🔍 View results**: Detected rooms appear with colored bounding boxes
+6. **📝 Check logs**: Detailed processing information in the bottom panel
 
-1. **Launch the app** on your device/emulator
-2. **Wait for model loading** (shown in status message)
-3. **Select an image** using one of these options:
-   - 📷 **Camera**: Take a photo of a floor plan
-   - 🖼️ **Gallery**: Choose from existing photos
-   - 📋 **Sample**: Use bundled test image
-4. **View results**: Detected rooms appear with red bounding boxes and confidence scores
+### Service Selection Guide
 
-## App Architecture
+**When to use Streamlined Mode:**
+
+- Images smaller than 2000×2000 pixels
+- Quick processing needed
+- Simple floor plans with clear room boundaries
+
+**When to use Tiled Mode:**
+
+- Large architectural drawings (>2000×2000 pixels)
+- Complex floor plans with many small rooms
+- Maximum detection accuracy required
+- PDF imports of detailed blueprints
+
+## 🏛️ App Architecture
 
 ### Core Components
 
-- **`RoomDetectionService`** - Handles TensorFlow Lite model loading and inference
-- **`FloorPlanDetectionScreen`** - Main UI screen with image selection and results
-- **`DetectionOverlayPainter`** - Custom painter for drawing bounding boxes
-- **`Detection`** - Data class for detection results
+#### Services Layer
 
-### Key Features
+- **`BaseRoomDetectionService`** - Abstract interface for all detection services
+- **`StreamlinedRoomDetectionService`** - Direct inference for standard-sized images
+- **`TiledRoomDetectionService`** - Advanced tiling pipeline for large images
+- **`PdfProcessingService`** - PDF to image conversion and preprocessing
+- **`RoomDetectionServiceFactory`** - Factory pattern for service creation
 
-#### Image Preprocessing
+#### UI Layer
 
-- Resize to 640x640 pixels
-- RGB normalization to [0, 1] range
-- Tensor format conversion for YOLO input
+- **`FloorPlanDetectionScreen`** - Main application screen with full functionality
+- **`DetectionOverlayPainter`** - Custom painter for rendering detection results
+- **Material 3 Design** - Modern, adaptive UI components
 
-#### YOLO Inference
+#### Data Layer
 
-- On-device TensorFlow Lite execution
-- No network connectivity required
-- Real-time processing
+- **`Detection`** - Core data class for detection results
+- **`SegmentationDetection`** - Extended detection with mask data
+- **`ModelConfig`** - Configuration for model loading and weighting
+
+### Key Features Deep Dive
+
+#### 🔄 Multi-Model Ensemble
+
+The app automatically loads and combines multiple models:
+
+```dart
+ModelConfig(assetPath: 'assets/models/floorplan_v17.2.tflite', weight: 1.0),
+ModelConfig(assetPath: 'assets/models/floorplans-seg_v19.tflite', weight: 0.75),
+```
+
+- **Weighted averaging** of confidence scores
+- **Redundancy** for improved accuracy
+- **Fallback support** if one model fails
+
+#### 🧩 Intelligent Tiling System
+
+For large images, the app automatically:
+
+1. **Splits into 640×640 overlapping tiles**
+2. **Processes each tile independently**
+3. **Transforms coordinates** back to global space
+4. **Applies global NMS** to remove duplicates
+5. **Merges results** across all tiles
+
+#### 📊 Real-time Logging
+
+Comprehensive logging system provides:
+
+- **Model loading progress**
+- **Processing pipeline status**
+- **Detection counts and confidence scores**
+- **Performance metrics and timing**
+- **Error handling and debugging info**
+
+#### ⚙️ Adaptive Processing
+
+The app automatically recommends processing mode based on:
+
+- **Image dimensions** (threshold: 2000×2000 pixels)
+- **Available memory**
+- **Processing complexity**
+
+### Image Processing Pipeline
+
+#### Preprocessing
+
+- **Format conversion** to RGB if needed
+- **Resize** to model input size (640×640)
+- **Normalization** to [0, 1] range
+- **Tensor preparation** for TensorFlow Lite
+
+#### Inference
+
+- **Multi-model execution** in parallel
+- **Confidence scoring** with weighted averaging
+- **Class filtering** (room detection only)
+- **Memory-efficient** batch processing
 
 #### Post-processing
 
-- Confidence threshold filtering (50%)
-- Non-Maximum Suppression (NMS) for duplicate removal
-- Coordinate scaling to original image dimensions
+- **Confidence thresholding** (default: 50%)
+- **Non-Maximum Suppression** (NMS threshold: 45%)
+- **Coordinate scaling** to original image dimensions
+- **Bounding box refinement** and validation
 
-#### Visualization
+## ⚙️ Configuration & Customization
 
-- Custom painter overlay on original images
-- Bounding box rendering with labels
-- Confidence percentage display
+### Detection Parameters
 
-## Customization
+You can adjust detection sensitivity in the service files:
 
-### Adjust Detection Parameters
-
-Edit `lib/services/room_detection_service.dart`:
+**Confidence Threshold** (in `streamlined_room_detection_service.dart`):
 
 ```dart
-static const double confidenceThreshold = 0.5;  // Minimum confidence
-static const double nmsThreshold = 0.45;        // NMS threshold
-static const int roomClassId = 0;               // Target class ID
+static const double confidenceThreshold = 0.5;  // Minimum confidence (50%)
 ```
 
-### Model Path
-
-Update the model path in `RoomDetectionService`:
+**NMS Threshold** (for duplicate removal):
 
 ```dart
-static const String modelPath = 'assets/models/your_model.tflite';
+static const double nmsThreshold = 0.45;        // Overlap threshold (45%)
+```
+
+**Model Weights** (in `floorplan_detection_screen.dart`):
+
+```dart
+ModelConfig(assetPath: 'assets/models/floorplan_v17.2.tflite', weight: 1.0),
+ModelConfig(assetPath: 'assets/models/floorplans-seg_v19.tflite', weight: 0.75),
+```
+
+### Service Selection
+
+**Manual Override** (in the UI):
+
+- Toggle between "Streamlined" and "Tiled" modes
+- App provides recommendations based on image size
+
+**Automatic Selection Threshold**:
+
+```dart
+static DetectionServiceType getRecommendedServiceType({
+  required int imageWidth,
+  required int imageHeight,
+  int maxStreamlinedSize = 2000,  // Configurable threshold
+})
 ```
 
 ### UI Customization
 
-Modify colors, layouts, and styling in:
+**Theme Colors** (in `main.dart`):
 
-- `lib/screens/floorplan_detection_screen.dart`
-- `lib/widgets/detection_overlay.dart`
+```dart
+theme: ThemeData(
+  colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
+  useMaterial3: true,
+),
+```
 
-## Troubleshooting
+**Detection Overlay** (in `detection_overlay.dart`):
+
+- Bounding box colors and styles
+- Confidence score display format
+- Label positioning and fonts
+
+## 🐛 Troubleshooting
 
 ### Common Issues
 
-1. **Model not loading**
-   - Ensure `yolov5.tflite` exists in `assets/models/`
-   - Check file path in `pubspec.yaml` assets section
-   - Verify model is compatible TensorFlow Lite format
+#### 1. Models Not Loading
 
-2. **No detections found**
-   - Check confidence threshold (try lowering to 0.1)
-   - Verify model is trained for room detection
-   - Ensure input image contains clear room boundaries
+**Symptoms:** "Failed to load models" error message
 
-3. **Performance issues**
-   - Use smaller input size (e.g., 320x320)
-   - Optimize model with quantization
-   - Test on physical device vs emulator
+**Solutions:**
+
+- Verify all `.tflite` files exist in `assets/models/`
+- Check `pubspec.yaml` includes the assets folder
+- Ensure models are not corrupted (download again if needed)
+- Check console logs for specific TensorFlow Lite errors
+
+#### 2. No Detections Found
+
+**Symptoms:** "No rooms detected" message with clear floor plans
+
+**Solutions:**
+
+- Lower confidence threshold temporarily: `confidenceThreshold = 0.1`
+- Try switching between Streamlined and Tiled modes
+- Ensure image shows clear room boundaries and walls
+- Check if floor plan is similar to training data (architectural drawings)
+
+#### 3. Poor Detection Accuracy
+
+**Symptoms:** Missing rooms or false positives
+
+**Solutions:**
+
+- Use **Tiled mode** for large, detailed floor plans
+- Adjust model weights in the ensemble
+- Try different combinations of available models
+- Ensure good image quality and resolution
+
+#### 4. App Performance Issues
+
+**Symptoms:** Slow processing or memory errors
+
+**Solutions:**
+
+- Use **Streamlined mode** for smaller images
+- Close other apps to free memory
+- Test on physical device vs emulator
+- Reduce image size before processing
+
+#### 5. PDF Processing Fails
+
+**Symptoms:** Errors when importing PDF files
+
+**Solutions:**
+
+- Ensure PDF contains vector graphics or high-resolution images
+- Try converting PDF to image externally first
+- Check PDF file is not password-protected
+- Verify file size is reasonable (< 50MB recommended)
 
 ### Debug Information
 
-The app prints detection results to console:
+The app provides comprehensive logging in the bottom panel:
 
+```text
+=== Starting Model Initialization ===
+Loading Streamlined Detection (Full Image Resize) models...
+✓ Model loaded: assets/models/floorplan_v17.2.tflite (Weight: 1.0)
+✓ Model loaded: assets/models/floorplans-seg_v19.tflite (Weight: 0.75)
+✓ All models loaded successfully
+Models loaded. Select an image or PDF to analyze.
 ```
+
+**Detection Results Example:**
+
+```text
 Detected 3 rooms:
 Detection(label: Room, confidence: 0.85, box: [120.0, 50.0, 200.0, 150.0])
 Detection(label: Room, confidence: 0.72, box: [350.0, 80.0, 180.0, 120.0])
-...
+Detection(label: Room, confidence: 0.68, box: [50.0, 200.0, 150.0, 100.0])
 ```
 
-## Model Training (Advanced)
+### Performance Benchmarks
 
-To train your own room detection model:
+**Typical Processing Times:**
 
-1. **Collect floor plan images** with room annotations
-2. **Label bounding boxes** using tools like LabelImg or Roboflow
-3. **Train YOLOv5** with your dataset
-4. **Export to TensorFlow Lite** format
-5. **Test and iterate** on model performance
+- **Small images** (< 1000×1000): 1-3 seconds
+- **Medium images** (1000-2000×2000): 3-8 seconds  
+- **Large images** (> 2000×2000): 10-30 seconds (tiled)
+- **PDF conversion**: 2-5 seconds per page
 
-## Dependencies
+**Memory Usage:**
 
-- `tflite_flutter: ^0.9.1` - TensorFlow Lite inference
-- `image: ^3.3.0` - Image processing and manipulation
-- `image_picker: ^1.0.7` - Camera and gallery access
-- `path_provider: ^2.0.15` - File system access
+- **Base app**: ~100-200 MB
+- **Models loaded**: +150-300 MB
+- **Image processing**: +50-200 MB (depending on size)
 
-## License
+## 📚 Dependencies
 
-This project is open source and available under the MIT License.
+### Core Dependencies
 
-## Contributing
+```yaml
+dependencies:
+  flutter: sdk: flutter
+  tflite_flutter: ^0.11.0      # TensorFlow Lite inference engine
+  image: ^4.1.7                # Image processing and manipulation
+  image_picker: ^1.0.7         # Camera and gallery access
+  path_provider: ^2.1.2        # File system path access
+  file_picker: ^8.0.0+1        # PDF and file selection
+  printing: ^5.12.0            # PDF generation and export
+  pdf: ^3.10.7                 # PDF processing utilities
+```
 
-Contributions are welcome! Please feel free to submit issues, feature requests, or pull requests.
+### Development Dependencies
+
+```yaml
+dev_dependencies:
+  flutter_test: sdk: flutter
+  flutter_lints: ^5.0.0        # Dart/Flutter linting rules
+```
+
+### Model Requirements
+
+**Included Models:**
+
+- **Input size:** 640×640 pixels
+- **Output format:** Bounding boxes + confidence scores
+- **Classes:** Room detection (class_id: 0)
+- **Format:** TensorFlow Lite (.tflite)
+- **Architecture:** YOLO-based object detection/segmentation
+
+## 🧪 Testing & Development
+
+### Running Tests
+
+```bash
+# Run all tests
+flutter test
+
+# Run tests with coverage
+flutter test --coverage
+
+# Run integration tests (if available)
+flutter test integration_test/
+```
+
+### Building for Production
+
+```bash
+# Android APK
+flutter build apk --release
+
+# Android App Bundle
+flutter build appbundle --release
+
+# iOS (requires Xcode and Apple Developer account)
+flutter build ios --release
+
+# Web
+flutter build web --release
+
+# Desktop (macOS)
+flutter build macos --release
+```
+
+### Development Workflow
+
+1. **Make changes** to service or UI code
+2. **Hot reload** for UI changes (`r` in terminal)
+3. **Hot restart** for logic changes (`R` in terminal)
+4. **Test with different images** and service modes
+5. **Check logs** for debugging information
+6. **Run tests** before committing
+
+## 🔬 Advanced Usage
+
+### Adding Custom Models
+
+To add your own trained models:
+
+1. **Place model file** in `assets/models/`
+2. **Update model configuration:**
+
+```dart
+ModelConfig(
+  assetPath: 'assets/models/your_custom_model.tflite', 
+  weight: 1.0
+),
+```
+
+3. **Rebuild and test** the app
+
+### API Usage Examples
+
+**Programmatic Detection:**
+
+```dart
+// Create service
+final service = RoomDetectionServiceFactory.createService(
+  serviceType: DetectionServiceType.streamlined,
+  modelConfigs: [
+    ModelConfig(assetPath: 'assets/models/floorplan_v17.2.tflite', weight: 1.0),
+  ],
+);
+
+// Load models
+await service.loadModels();
+
+// Process image
+final detections = await service.processImageFile(imageFile);
+
+// Use results
+for (final detection in detections) {
+  print('Room found: ${detection.confidence}');
+}
+```
+
+### Performance Optimization
+
+**For Better Speed:**
+
+- Use Streamlined mode for smaller images
+- Reduce model ensemble size
+- Lower confidence threshold to reduce processing
+
+**For Better Accuracy:**
+
+- Use Tiled mode for large images
+- Include multiple models in ensemble
+- Increase overlap in tiling system
+
+## 🤝 Contributing
+
+We welcome contributions! Here's how to get started:
+
+### Development Setup
+
+1. **Fork the repository** on GitHub
+2. **Clone your fork** locally
+3. **Create a feature branch:** `git checkout -b feature/your-feature-name`
+4. **Make your changes** and test thoroughly
+5. **Follow coding standards** (use `flutter analyze`)
+6. **Submit a pull request** with detailed description
+
+### Contribution Guidelines
+
+- **Code Style:** Follow Dart/Flutter conventions
+- **Testing:** Add tests for new features
+- **Documentation:** Update README for significant changes
+- **Commits:** Use clear, descriptive commit messages
+- **Issues:** Report bugs with detailed reproduction steps
+
+### Areas for Contribution
+
+- **🧠 Model improvements** (training, optimization)
+- **🎨 UI/UX enhancements** (Material 3, accessibility)
+- **⚡ Performance optimizations** (memory, speed)
+- **🧪 Testing coverage** (unit, integration, widget tests)
+- **📖 Documentation** (API docs, tutorials, examples)
+- **🌐 Platform support** (Web, Desktop improvements)
+
+## 📄 License
+
+This project is licensed under the **MIT License** - see the [LICENSE](LICENSE) file for details.
+
+## 🙏 Acknowledgments
+
+- **Flutter Team** for the excellent cross-platform framework
+- **TensorFlow Team** for TensorFlow Lite mobile inference
+- **YOLO** researchers for object detection architecture
+- **Open source community** for various packages and tools
 
 ---
 
-**Note**: This app requires a pre-trained YOLO model for room detection. The model file is not included and must be provided separately.
+**⚠️ Note:** This app includes pre-trained models for demonstration. For production use, consider training models on your specific floor plan dataset for optimal accuracy.
+
+**🚀 Ready to detect rooms?** Launch the app and start analyzing your floor plans!

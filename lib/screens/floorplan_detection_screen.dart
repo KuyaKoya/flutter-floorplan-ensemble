@@ -47,15 +47,33 @@ class _FloorPlanDetectionScreenState extends State<FloorPlanDetectionScreen> {
     _addLog(
         'Initializing ${RoomDetectionServiceFactory.getServiceDescription(_selectedServiceType)}...');
 
+    // Configure models based on service type
+    List<ModelConfig> modelConfigs;
+
+    if (_selectedServiceType == DetectionServiceType.streamlined) {
+      // Streamlined detection: Use detection models without segmentation
+      modelConfigs = [
+        ModelConfig(
+            assetPath: 'assets/models/floorplan_v17.2.tflite', weight: 0.1),
+        ModelConfig(
+            assetPath: 'assets/models/floorplan_v12.tflite', weight: 0.1),
+      ];
+      _addLog('Using detection models for streamlined processing');
+    } else {
+      // Tiled detection: Use segmentation models
+      modelConfigs = [
+        ModelConfig(
+            assetPath: 'assets/models/floorplans-seg_v19.tflite', weight: 0.1),
+        ModelConfig(
+            assetPath: 'assets/models/floorplans-seg_v19.tflite', weight: 0.1),
+      ];
+      _addLog('Using segmentation models for tiled processing');
+    }
+
     // Create service using factory
     _detectionService = RoomDetectionServiceFactory.createService(
       serviceType: _selectedServiceType,
-      modelConfigs: [
-        ModelConfig(
-            assetPath: 'assets/models/floorplan_v17.2.tflite', weight: 1.0),
-        ModelConfig(
-            assetPath: 'assets/models/floorplans-seg_v19.tflite', weight: 0.75),
-      ],
+      modelConfigs: modelConfigs,
       onLog: _addLog,
     );
 
@@ -643,9 +661,91 @@ class _FloorPlanDetectionScreenState extends State<FloorPlanDetectionScreen> {
                     ),
                   ),
                   if (_isLoading)
-                    const Padding(
-                      padding: EdgeInsets.only(top: 16.0),
-                      child: CircularProgressIndicator(),
+                    Padding(
+                      padding: const EdgeInsets.only(top: 16.0),
+                      child: Column(
+                        children: [
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 16.0,
+                                  vertical: 8.0,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: Colors.blue.shade100,
+                                  borderRadius: BorderRadius.circular(20.0),
+                                  border: Border.all(
+                                    color: Colors.blue.shade300,
+                                    width: 2.0,
+                                  ),
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Container(
+                                      width: 12,
+                                      height: 12,
+                                      margin: const EdgeInsets.only(right: 8.0),
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2.0,
+                                        valueColor:
+                                            AlwaysStoppedAnimation<Color>(
+                                          Colors.blue.shade600,
+                                        ),
+                                      ),
+                                    ),
+                                    Text(
+                                      'PROCESSING',
+                                      style: TextStyle(
+                                        fontSize: 14,
+                                        fontWeight: FontWeight.bold,
+                                        color: Colors.blue.shade700,
+                                        letterSpacing: 1.0,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 8),
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 12.0,
+                              vertical: 6.0,
+                            ),
+                            decoration: BoxDecoration(
+                              color: Colors.orange.shade50,
+                              borderRadius: BorderRadius.circular(8.0),
+                              border: Border.all(
+                                color: Colors.orange.shade200,
+                                width: 1.0,
+                              ),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  Icons.info_outline,
+                                  size: 16,
+                                  color: Colors.orange.shade700,
+                                ),
+                                const SizedBox(width: 6),
+                                Text(
+                                  'App may pause during AI inference - this is normal',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: Colors.orange.shade700,
+                                    fontStyle: FontStyle.italic,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
                 ],
               ),
@@ -803,11 +903,103 @@ class _FloorPlanDetectionScreenState extends State<FloorPlanDetectionScreen> {
                 ),
               ),
 
+            // Confidence level legend
+            if (_detections.isNotEmpty)
+              Container(
+                width: double.infinity,
+                margin: const EdgeInsets.fromLTRB(16.0, 0.0, 16.0, 16.0),
+                padding: const EdgeInsets.all(16.0),
+                decoration: BoxDecoration(
+                  color: Colors.grey.shade50,
+                  borderRadius: BorderRadius.circular(8.0),
+                  border: Border.all(color: Colors.grey.shade300),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Confidence Level Guide:',
+                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                            fontWeight: FontWeight.bold,
+                            color: Colors.grey.shade800,
+                          ),
+                    ),
+                    const SizedBox(height: 12),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Column(
+                            children: [
+                              _buildConfidenceLegendItem(
+                                  Colors.red, 'High', '80%+'),
+                              const SizedBox(height: 8),
+                              _buildConfidenceLegendItem(
+                                  Colors.orange, 'Med-High', '60-80%'),
+                              const SizedBox(height: 8),
+                              _buildConfidenceLegendItem(
+                                  Colors.yellow, 'Medium', '40-60%'),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: 16),
+                        Expanded(
+                          child: Column(
+                            children: [
+                              _buildConfidenceLegendItem(
+                                  Colors.cyan, 'Med-Low', '20-40%'),
+                              const SizedBox(height: 8),
+                              _buildConfidenceLegendItem(
+                                  Colors.purple, 'Low', '<20%'),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    Text(
+                      'Each detection is numbered and color-coded by confidence level.',
+                      style: TextStyle(
+                        color: Colors.grey.shade600,
+                        fontSize: 12,
+                        fontStyle: FontStyle.italic,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+
             // Add some bottom padding to ensure content doesn't get cut off
             const SizedBox(height: 32),
           ],
         ),
       ),
+    );
+  }
+
+  /// Helper method to build confidence legend items
+  Widget _buildConfidenceLegendItem(Color color, String level, String range) {
+    return Row(
+      children: [
+        Container(
+          width: 16,
+          height: 16,
+          decoration: BoxDecoration(
+            color: color,
+            borderRadius: BorderRadius.circular(2),
+            border: Border.all(color: Colors.white, width: 1),
+          ),
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text(
+            '$level ($range)',
+            style: const TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+        ),
+      ],
     );
   }
 }

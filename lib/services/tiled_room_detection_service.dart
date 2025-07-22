@@ -236,9 +236,42 @@ class TiledRoomDetectionService extends BaseRoomDetectionService {
           // Create output buffers
           final outputs = _createOutputBuffers(interpreter);
 
-          // Run inference
-          final inputData = preprocessedData['float32List'] as Float32List;
-          interpreter.run(inputData, outputs[0]);
+          // Try different input formats to ensure compatibility
+          bool inferenceSuccess = false;
+          String errorMessage = '';
+
+          // Try nested list format first (most compatible)
+          try {
+            final inputData = preprocessedData['nestedList'];
+            interpreter.run(inputData, outputs[0]);
+            inferenceSuccess = true;
+          } catch (e) {
+            errorMessage = 'Nested list: $e';
+
+            // Try Float32List format as fallback
+            try {
+              final inputData = preprocessedData['float32List'] as Float32List;
+              interpreter.run(inputData, outputs[0]);
+              inferenceSuccess = true;
+            } catch (e2) {
+              errorMessage += ', Float32List: $e2';
+
+              // Try reshaped tensor format
+              try {
+                final inputData =
+                    preprocessedData['float32List'] as Float32List;
+                final reshapedInput = [inputData];
+                interpreter.run(reshapedInput, outputs[0]);
+                inferenceSuccess = true;
+              } catch (e3) {
+                errorMessage += ', Reshaped: $e3';
+              }
+            }
+          }
+
+          if (!inferenceSuccess) {
+            throw Exception('All input formats failed: $errorMessage');
+          }
 
           // Post-process detections for this model
           final modelDetections = await compute(_postprocessTileDetections, {
@@ -326,8 +359,23 @@ class TiledRoomDetectionService extends BaseRoomDetectionService {
       }
     }
 
+    // Create nested list format (4D: [batch, height, width, channels])
+    final nestedList = List.generate(1, (batch) {
+      return List.generate(tileSize, (h) {
+        return List.generate(tileSize, (w) {
+          final baseIndex = (h * tileSize + w) * 3;
+          return [
+            inputBytes[baseIndex], // R
+            inputBytes[baseIndex + 1], // G
+            inputBytes[baseIndex + 2], // B
+          ];
+        });
+      });
+    });
+
     return {
       'float32List': inputBytes,
+      'nestedList': nestedList,
     };
   }
 
